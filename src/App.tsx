@@ -1,16 +1,26 @@
 import React, { useEffect, useRef, useState } from "react";
 
-/**
- * OTD / INLINE Multi-Order Execution Planner (No-Login)
- * - Sticky summary (ALL / BUY / SELL)
- * - Order-name chips to filter one or ALL
- * - BUY (green) / SELL (red) color themes
- * - VWAP inputs accept decimals while typing; format on blur
- * - Auto-recalculation on ANY input change
- * - Time-sliced OTD & INLINE with caps, auction handling
- * - Live-slice highlight, reminders, CSV export
- * - Execution Coach (participation tracking, cap heat, urgency, tips)
- */
+/** ======================================================================
+ * Execution Planner — Per-Order Presets + Metrics/Alerts + HUD + Rail
+ * ====================================================================== */
+
+type ExecMode = "OTD" | "INLINE";
+type CapMode = "NONE" | "PCT";
+type Curve = "equal" | "ucurve";
+type Side = "BUY" | "SELL";
+type MarketKey = "Egypt" | "Kuwait" | "Qatar" | "DFM" | "ADX" | "Saudi";
+
+const MARKET_PRESET: Record<
+  MarketKey,
+  { start: string; auction: string; auctionMatch: string; talStart: string; talEnd: string }
+> = {
+  Egypt: { start: "10:00", auction: "14:15", auctionMatch: "14:25", talStart: "14:25", talEnd: "14:30" },
+  Kuwait:{ start: "09:00", auction: "12:30", auctionMatch: "12:40", talStart: "12:40", talEnd: "12:45" },
+  Qatar: { start: "09:30", auction: "13:00", auctionMatch: "13:10", talStart: "13:10", talEnd: "13:15" },
+  DFM:   { start: "09:00", auction: "13:45", auctionMatch: "13:55", talStart: "13:55", talEnd: "14:00" },
+  ADX:   { start: "09:00", auction: "13:45", auctionMatch: "13:55", talStart: "13:55", talEnd: "14:00" },
+  Saudi: { start: "10:00", auction: "15:00", auctionMatch: "15:10", talStart: "15:10", talEnd: "15:20" },
+};
 
 /* -------------------- Utilities -------------------- */
 function minutesBetween(t1: string, t2: string) {
@@ -18,7 +28,6 @@ function minutesBetween(t1: string, t2: string) {
   const [h2, m2] = t2.split(":").map((x) => parseInt(x || "0", 10));
   return h2 * 60 + m2 - (h1 * 60 + m1);
 }
-
 function addMinutes(t: string, mins: number) {
   const [h, m] = t.split(":").map((x) => parseInt(x || "0", 10));
   const total = h * 60 + m + mins;
@@ -26,7 +35,6 @@ function addMinutes(t: string, mins: number) {
   const mm = ((total % 60) + 60) % 60;
   return `${String(hh).padStart(2, "0")}:${String(mm).padStart(2, "0")}`;
 }
-
 function timeSlices(start: string, end: string, step: number) {
   const out: { s: string; e: string; label: string }[] = [];
   const total = Math.max(0, minutesBetween(start, end));
@@ -38,40 +46,21 @@ function timeSlices(start: string, end: string, step: number) {
   }
   return out;
 }
-
 function uCurveWeights(n: number) {
   if (n <= 0) return [] as number[];
-  const weights: number[] = [];
+  const w: number[] = [];
   const mid = (n - 1) / 2;
   for (let i = 0; i < n; i++) {
     const x = Math.abs(i - mid) / (mid || 1);
-    const w = 0.6 + 0.8 * (1 - x); // heavier center
-    weights.push(w);
+    w.push(0.6 + 0.8 * (1 - x));
   }
-  const sum = weights.reduce((a, b) => a + b, 0) || 1;
-  return weights.map((w) => w / sum);
+  const sum = w.reduce((a, b) => a + b, 0) || 1;
+  return w.map((x) => x / sum);
 }
-
 function equalWeights(n: number) {
   if (n <= 0) return [] as number[];
   return Array(n).fill(1 / n);
 }
-
-function toCSV(rows: any[]) {
-  if (!rows.length) return "";
-  const headers = Object.keys(rows[0]);
-  const esc = (v: any) => {
-    const s = String(v ?? "");
-    if (/[",\n]/.test(s)) return '"' + s.replace(/"/g, '""') + '"';
-    return s;
-  };
-  const lines = [headers.join(",")].concat(
-    rows.map((r) => headers.map((h) => esc(r[h])).join(","))
-  );
-  return lines.join("\n");
-}
-
-/* -------------------- Number & Money Inputs -------------------- */
 function formatInt(n: number | null | undefined) {
   if (n == null || isNaN(n as any)) return "";
   return Math.trunc(Number(n)).toLocaleString();
@@ -90,45 +79,59 @@ function formatMoney(n: number | null | undefined, decimals = 4) {
 function parseMoneySafeAllowTyping(v: string) {
   const cleaned = v.replace(/[^0-9.]/g, "");
   const parts = cleaned.split(".");
-  if (parts.length > 2) {
-    const join = parts[0] + "." + parts.slice(1).join("");
-    return join;
-  }
+  if (parts.length > 2) return parts[0] + "." + parts.slice(1).join("");
   return cleaned;
 }
 function toNumberOrZero(v: string) {
   const n = parseFloat(v);
   return isNaN(n) ? 0 : n;
 }
-
-function useInterval(callback: () => void, delay: number | null) {
-  const savedRef = useRef<() => void>();
+function nowHHMM() {
+  const d = new Date();
+  return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+}
+function nowHHMMSS() {
+  const d = new Date();
+  return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}:${String(
+    d.getSeconds()
+  ).padStart(2, "0")}`;
+}
+function useInterval(cb: () => void, delay: number | null) {
+  const ref = useRef(cb);
   useEffect(() => {
-    savedRef.current = callback;
-  }, [callback]);
+    ref.current = cb;
+  }, [cb]);
   useEffect(() => {
-    if (delay === null) return;
-    const id = setInterval(() => savedRef.current && savedRef.current(), delay);
+    if (delay == null) return;
+    const id = setInterval(() => ref.current(), delay);
     return () => clearInterval(id);
   }, [delay]);
 }
 
-/* -------------------- Types -------------------- */
-export type ExecMode = "OTD" | "INLINE";
-export type CapMode = "NONE" | "PCT";
-export type Curve = "equal" | "ucurve";
-export type Side = "BUY" | "SELL";
+/* -------------------- Types & defaults -------------------- */
+type Snapshot = {
+  at: string; // HH:MM:SS
+  currentVol: number;
+  expectedContVol: number;
+  expectedAuctionVol: number;
+  orderExecQty: number;
+  orderExecNotional: number;
+  marketTurnover: number;
+  marketVWAPInput: number;
+};
 
-export type Order = {
+type Order = {
   id: string;
   name: string;
   symbol: string;
   side: Side;
+
   orderQty: number;
+
   execMode: ExecMode;
   capMode: CapMode;
-  maxPart: number;
-  reserveAuctionPct: number;
+  maxPart: number; // %
+  reserveAuctionPct: number; // %
   deferCompletion: boolean;
 
   sessionStart: string;
@@ -140,28 +143,36 @@ export type Order = {
   intervalMins: number;
   curve: Curve;
 
+  // volumes (dealer-updated intraday)
   startVol: number;
   currentVol: number;
   expectedContVol: number;
   expectedAuctionVol: number;
 
-  // VWAP monitoring
-  marketTurnover: number; // currency
-  marketVWAPInput: number; // manual VWAP if turnover unavailable
+  // VWAP monitor (either turnover OR manual VWAP)
+  marketTurnover: number;
+  marketVWAPInput: number;
+
+  // executed so far
   orderExecQty: number;
   orderExecNotional: number;
 
-  remindersOn: boolean;
-  remindEveryMins: number;
+  // per-order UI helpers
+  market?: MarketKey;
+  startFromNow?: boolean;
+
+  // history
+  snapshots: Snapshot[];
 };
 
-function defaultOrder(side: Side = "BUY", idx = 1): Order {
+function defaultOrder(side: Side, idx = 1): Order {
   return {
     id: Math.random().toString(36).slice(2, 9),
     name: side === "BUY" ? `Buy ${idx}` : `Sell ${idx}`,
     symbol: "QNBK",
     side,
     orderQty: 1_600_000,
+
     execMode: "OTD",
     capMode: "PCT",
     maxPart: 15,
@@ -184,84 +195,61 @@ function defaultOrder(side: Side = "BUY", idx = 1): Order {
 
     marketTurnover: 0,
     marketVWAPInput: 0,
+
     orderExecQty: 0,
     orderExecNotional: 0,
 
-    remindersOn: false,
-    remindEveryMins: 15,
+    market: "Qatar",
+    startFromNow: false,
+
+    snapshots: [],
   };
 }
 
-/* -------------------- Planning Logic -------------------- */
-type BuiltPlan = {
-  rows: any[];
-  contPlanned: number;
-  auctionAllowed: number;
-  auctionPlanned: number;
-  talNote: string;
-  // analytics
-  capBindingPct: number;     // % slices where suggested hits cap
-  impliedPartRate: number;   // planned vs expected total
-  targetPartRate: number;    // desired participation for INLINE; implied for OTD
-};
+/* -------------------- Planning & analytics -------------------- */
+function applyCap(capMode: CapMode, maxPart: number, qty: number, sliceVol: number) {
+  if (capMode === "NONE") return Math.max(0, Math.floor(qty));
+  const allowed = Math.floor((sliceVol * maxPart) / 100);
+  return Math.max(0, Math.min(Math.floor(qty), allowed));
+}
 
-function buildPlan(order: Order): BuiltPlan {
+function buildPlan(order: Order) {
   const slices = timeSlices(order.sessionStart, order.sessionEnd, order.intervalMins);
-  const weights =
-    order.curve === "equal" ? equalWeights(slices.length) : uCurveWeights(slices.length);
-
+  const weights = order.curve === "equal" ? equalWeights(slices.length) : uCurveWeights(slices.length);
   const contVolPerSlice = weights.map((w) => Math.floor(w * order.expectedContVol));
   const reserveAuctionQty = Math.floor((order.orderQty * order.reserveAuctionPct) / 100);
 
-  const applyCap = (qty: number, sliceVol: number) => {
-    if (order.capMode === "NONE") return Math.max(0, Math.floor(qty));
-    const allowed = Math.floor((sliceVol * order.maxPart) / 100);
-    return Math.max(0, Math.min(Math.floor(qty), allowed));
-  };
+  const auctionAllowed =
+    order.capMode === "PCT" ? Math.floor((order.expectedAuctionVol * order.maxPart) / 100) : order.expectedAuctionVol;
 
-  let rows: any[] = [];
-  let auctionAllowed =
-    order.capMode === "PCT"
-      ? Math.floor((order.expectedAuctionVol * order.maxPart) / 100)
-      : order.expectedAuctionVol;
-
-  let capBindings = 0;
-
+  // OTD time-sliced
   if (order.execMode === "OTD") {
     const targetContinuousQty = Math.max(0, order.orderQty - reserveAuctionQty);
-    let remainingForContinuous = targetContinuousQty;
+    let remaining = targetContinuousQty;
 
-    rows = slices.map((slice, i) => {
+    const rows = slices.map((slice, i) => {
       const sliceVol = Math.max(0, contVolPerSlice[i]);
-      const base = Math.floor(weights[i] * targetContinuousQty);
-      let suggested = Math.min(base, remainingForContinuous);
-      const preCap = suggested;
-      suggested = applyCap(suggested, sliceVol);
+      let base = Math.floor(weights[i] * targetContinuousQty);
+      base = Math.min(base, remaining);
+      let suggested = applyCap(order.capMode, order.maxPart, base, sliceVol);
 
-      if (order.capMode === "PCT" && suggested === Math.floor((sliceVol * order.maxPart) / 100)) {
-        if (preCap > suggested) capBindings++;
+      // Defer completion: hold a bit for last / auction
+      const isLast = i === slices.length - 1;
+      if (order.deferCompletion && !isLast) {
+        const keepBack = Math.ceil(targetContinuousQty * 0.05);
+        if (remaining - suggested <= 0) suggested = Math.max(0, remaining - keepBack);
       }
 
-      const isLastSlice = i === slices.length - 1;
-      if (order.deferCompletion && !isLastSlice) {
-        const minRemainder = Math.ceil(targetContinuousQty * 0.05);
-        if (remainingForContinuous - suggested <= 0) {
-          suggested = Math.max(0, remainingForContinuous - Math.max(0, minRemainder));
-        }
-      }
-
-      suggested = Math.min(suggested, remainingForContinuous);
-      remainingForContinuous -= suggested;
+      suggested = Math.min(suggested, remaining);
+      remaining -= suggested;
 
       return {
         interval: slice.label,
         s: slice.s,
         e: slice.e,
         expMktVol: sliceVol,
-        maxAllowed:
-          order.capMode === "PCT" ? Math.floor((sliceVol * order.maxPart) / 100) : "∞",
+        maxAllowed: order.capMode === "PCT" ? Math.floor((sliceVol * order.maxPart) / 100) : "∞",
         suggestedQty: suggested,
-        notes: order.capMode === "PCT" ? "Respects cap" : "No cap",
       };
     });
 
@@ -270,56 +258,33 @@ function buildPlan(order: Order): BuiltPlan {
       reserveAuctionQty + Math.max(0, targetContinuousQty - contPlanned),
       auctionAllowed
     );
-    const talNote =
-      auctionPlanned < reserveAuctionQty ? "Auction thin; carry to TAL" : "";
 
-    // implied participation vs expected total volume
-    const expectedTotal = order.currentVol + order.expectedContVol + order.expectedAuctionVol;
-    const impliedPartRate = expectedTotal > 0 ? (contPlanned + auctionPlanned) / expectedTotal : 0;
-    const targetPartRate = impliedPartRate; // OTD implied
-
-    return {
-      rows,
-      contPlanned,
-      auctionAllowed,
-      auctionPlanned,
-      talNote,
-      capBindingPct: slices.length ? (capBindings / slices.length) * 100 : 0,
-      impliedPartRate,
-      targetPartRate,
-    };
+    return { rows, contPlanned, auctionAllowed, auctionPlanned };
   }
 
-  // INLINE mode
+  // INLINE (POV)
   const expectedTotalVol = order.currentVol + order.expectedContVol + order.expectedAuctionVol;
-  const targetPartRate =
-    expectedTotalVol > 0 ? Math.min(1, order.orderQty / expectedTotalVol) : 0;
+  const pov = expectedTotalVol > 0 ? Math.min(1, order.orderQty / expectedTotalVol) : 0;
 
-  rows = slices.map((slice, i) => {
+  const rows = slices.map((slice, i) => {
     const sliceVol = Math.max(0, contVolPerSlice[i]);
-    const base = Math.floor(sliceVol * targetPartRate);
-    const preCap = base;
-    const suggested = applyCap(base, sliceVol);
-    if (order.capMode === "PCT" && suggested === Math.floor((sliceVol * order.maxPart) / 100)) {
-      if (preCap > suggested) capBindings++;
-    }
+    const base = Math.floor(sliceVol * pov);
+    const suggested = applyCap(order.capMode, order.maxPart, base, sliceVol);
     return {
       interval: slice.label,
       s: slice.s,
       e: slice.e,
       expMktVol: sliceVol,
-      maxAllowed:
-        order.capMode === "PCT" ? Math.floor((sliceVol * order.maxPart) / 100) : "∞",
+      maxAllowed: order.capMode === "PCT" ? Math.floor((sliceVol * order.maxPart) / 100) : "∞",
       suggestedQty: suggested,
-      notes: order.capMode === "PCT" ? "Inline + cap" : "Inline (no cap)",
     };
   });
 
   const contPlanned = rows.reduce((a, r) => a + r.suggestedQty, 0);
   let auctionPlanned =
     order.capMode === "PCT"
-      ? Math.floor((order.expectedAuctionVol * targetPartRate * order.maxPart) / 100)
-      : Math.floor(order.expectedAuctionVol * targetPartRate);
+      ? Math.floor((order.expectedAuctionVol * pov * order.maxPart) / 100)
+      : Math.floor(order.expectedAuctionVol * pov);
 
   let totalPlanned = contPlanned + auctionPlanned;
   if (totalPlanned > order.orderQty) {
@@ -328,59 +293,88 @@ function buildPlan(order: Order): BuiltPlan {
       for (let i = rows.length - 1; i >= 0 && excess > 0; i--) {
         const trim = Math.min(excess, rows[i].suggestedQty);
         rows[i].suggestedQty -= trim;
+        totalPlanned -= trim;
       }
     } else {
       auctionPlanned = Math.max(0, auctionPlanned - excess);
     }
   }
 
-  const talNote = order.deferCompletion
-    ? "Completion deferred to auction if possible"
-    : "";
-
-  const impliedPartRate =
-    expectedTotalVol > 0 ? (contPlanned + auctionPlanned) / expectedTotalVol : 0;
-
-  return {
-    rows,
-    contPlanned,
-    auctionAllowed,
-    auctionPlanned,
-    talNote,
-    capBindingPct: slices.length ? (capBindings / slices.length) * 100 : 0,
-    impliedPartRate,
-    targetPartRate,
-  };
+  return { rows, contPlanned, auctionAllowed, auctionPlanned };
 }
 
-/* -------------------- Small Helpers -------------------- */
-function nowHHMMSS() {
-  const d = new Date();
-  const hh = String(d.getHours()).padStart(2, "0");
-  const mm = String(d.getMinutes()).padStart(2, "0");
-  const ss = String(d.getSeconds()).padStart(2, "0");
-  return `${hh}:${mm}:${ss}`;
-}
-function withinSlice(current: string, s: string, e: string) {
-  const toMin = (t: string) => {
-    const parts = t.split(":");
-    const hh = parseInt(parts[0] || "0", 10);
-    const mm = parseInt(parts[1] || "0", 10);
-    return hh * 60 + mm;
-  };
-  const cur = toMin(current);
-  const cs = toMin(s);
-  const ce = toMin(e);
-  return cur >= cs && cur < ce;
+function performanceBps(side: Side, orderVWAP: number, marketVWAP: number) {
+  if (!marketVWAP || !orderVWAP) return 0;
+  return side === "BUY"
+    ? ((marketVWAP - orderVWAP) / marketVWAP) * 10000
+    : ((orderVWAP - marketVWAP) / marketVWAP) * 10000;
 }
 
-function HeaderStat({
-  title,
-  value,
-}: {
-  title: string;
-  value: React.ReactNode;
-}) {
+/* -------------------- Metrics & Alerts Engine -------------------- */
+type Metrics = {
+  targetPOV: number;
+  actualPOV: number;
+  povDrift: number;
+  capHeat: number;
+  slipBps: number;
+  paceRatio: number; // reserved
+  minutesToAuction: number;
+  completionRiskPct: number;
+  shortfallShares: number;
+  urgency: number; // 0..1
+};
+type Alert = { kind: string; message: string; severity: "info" | "warn" | "danger" };
+
+function computeMetrics(order: Order, plan: ReturnType<typeof buildPlan>): Metrics {
+  const expTotal = order.startVol + order.currentVol + order.expectedContVol + order.expectedAuctionVol;
+  const targetPOV = expTotal > 0 ? order.orderQty / expTotal : 0;
+  const actualPOV = expTotal > 0 ? order.orderExecQty / expTotal : 0;
+  const povDrift = actualPOV - targetPOV;
+
+  const capHits = plan.rows.filter(r => typeof r.maxAllowed === "number" && r.suggestedQty >= r.maxAllowed).length;
+  const capHeat = plan.rows.length > 0 ? capHits / plan.rows.length : 0;
+
+  const marketVWAP = order.currentVol > 0
+    ? order.marketTurnover > 0
+      ? order.marketTurnover / order.currentVol
+      : order.marketVWAPInput || 0
+    : order.marketVWAPInput || 0;
+  const orderVWAP = order.orderExecQty > 0 ? order.orderExecNotional / order.orderExecQty : 0;
+  const slipBps = performanceBps(order.side, orderVWAP, marketVWAP);
+
+  const minutesToAuction = minutesBetween(nowHHMM(), order.auctionStart);
+
+  const plannedTotal = plan.contPlanned + plan.auctionPlanned;
+  const completionRiskPct = plannedTotal < order.orderQty
+    ? 1 - plannedTotal / order.orderQty
+    : 0;
+  const shortfallShares = Math.max(0, order.orderQty - plannedTotal);
+
+  const urgency =
+    0.35 * Math.max(0, (order.orderQty - order.orderExecQty)) / Math.max(1, order.orderQty) +
+    0.2  * Math.max(0, 1 - Math.max(0, minutesToAuction) / 60) +
+    0.15 * capHeat +
+    0.15 * Math.min(Math.abs(slipBps) / 100, 1) +
+    0.1  * Math.min(Math.abs(povDrift) / 0.05, 1);
+
+  return { targetPOV, actualPOV, povDrift, capHeat, slipBps, paceRatio: 1, minutesToAuction, completionRiskPct, shortfallShares, urgency };
+}
+
+function buildAlerts(m: Metrics, order: Order): Alert[] {
+  const alerts: Alert[] = [];
+  // basic data presence
+  if (!(order.marketTurnover > 0 || order.marketVWAPInput > 0)) alerts.push({ kind: "VWAP_MISS", message: "Missing market VWAP (turnover or manual)", severity: "info" });
+  if (order.currentVol === 0 && order.startVol === 0) alerts.push({ kind: "VOL_MISS", message: "Missing market volume", severity: "info" });
+  // execution risk
+  if (Math.abs(m.povDrift) > 0.05) alerts.push({ kind: "POV_DRIFT", message: "POV drift >5%", severity: "warn" });
+  if (m.capHeat > 0.4) alerts.push({ kind: "CAP_BIND", message: "Cap binding in many slices", severity: "warn" });
+  if (Math.abs(m.slipBps) >= 25) alerts.push({ kind: "VWAP", message: `VWAP slippage ${m.slipBps.toFixed(0)} bps`, severity: "danger" });
+  if (m.completionRiskPct > 0.2) alerts.push({ kind: "COMP", message: "Risk of under-completion", severity: "danger" });
+  return alerts;
+}
+
+/* -------------------- Small UI atoms -------------------- */
+function HeaderStat({ title, value }: { title: string; value: React.ReactNode }) {
   return (
     <div className="p-3 rounded-xl bg-slate-100">
       <div className="opacity-60 text-xs">{title}</div>
@@ -388,8 +382,6 @@ function HeaderStat({
     </div>
   );
 }
-
-// Integer input (formatted with commas)
 function IntInput({
   label,
   value,
@@ -420,8 +412,6 @@ function IntInput({
     </label>
   );
 }
-
-// Decimal-friendly money input (formats on blur)
 function MoneyInput({
   label,
   value,
@@ -436,10 +426,7 @@ function MoneyInput({
   decimals?: number;
 }) {
   const [draft, setDraft] = useState(value === 0 ? "" : String(value));
-  useEffect(() => {
-    setDraft(value === 0 ? "" : String(value));
-  }, [value]);
-
+  useEffect(() => setDraft(value === 0 ? "" : String(value)), [value]);
   return (
     <label className={`text-sm ${className || ""}`}>
       {label}
@@ -465,91 +452,13 @@ function MoneyInput({
     </label>
   );
 }
-
-// Direction-aware VWAP performance (BUY positive when order < market; SELL opposite)
-function performanceBps(side: Side, orderVWAP: number, marketVWAP: number) {
-  if (!marketVWAP || !orderVWAP) return 0;
+function theme(side: Side) {
   return side === "BUY"
-    ? ((marketVWAP - orderVWAP) / marketVWAP) * 10000
-    : ((orderVWAP - marketVWAP) / marketVWAP) * 10000;
+    ? { text: "text-emerald-700", bgSoft: "bg-emerald-50", border: "border-emerald-300", strong: "bg-emerald-600" }
+    : { text: "text-rose-700", bgSoft: "bg-rose-50", border: "border-rose-300", strong: "bg-rose-600" };
 }
 
-/* -------------------- Coach logic (diagnostics → tips) -------------------- */
-function coachTips(order: Order, plan: BuiltPlan) {
-  const tips: string[] = [];
-
-  // Liquidity regime
-  const totalExpVol = order.currentVol + order.expectedContVol + order.expectedAuctionVol;
-  const volRatio = totalExpVol > 0 ? order.orderQty / totalExpVol : 0;
-  const liquidity =
-    volRatio >= 0.35 ? "Heavy"
-    : volRatio >= 0.15 ? "Normal"
-    : "Thin";
-
-  // Participation tracking
-  const behind = plan.impliedPartRate < plan.targetPartRate * 0.9;
-  const ahead  = plan.impliedPartRate > plan.targetPartRate * 1.1;
-
-  // Cap binding heat
-  if (order.capMode === "PCT") {
-    if (plan.capBindingPct >= 40) {
-      tips.push(`Cap binding on ${plan.capBindingPct.toFixed(0)}% of slices → consider raising cap to ${Math.min(50, order.maxPart + 5)}% for next 2 slices.`);
-    } else if (plan.capBindingPct >= 15) {
-      tips.push(`Cap binding noticeable (${plan.capBindingPct.toFixed(0)}%) → micro-raise cap by +2–3% where liquidity allows.`);
-    }
-  }
-
-  // Urgency index
-  const minsLeft = Math.max(1, minutesBetween(order.sessionStart, order.sessionEnd));
-  const now = new Date();
-  const nowHHMM = now.toTimeString().slice(0,5);
-  const elapsed = Math.max(0, minutesBetween(order.sessionStart, nowHHMM));
-  const timeFrac = Math.min(1, Math.max(0, elapsed / minsLeft));
-  const remainingFrac = 1 - (plan.contPlanned + plan.auctionPlanned) / Math.max(1, order.orderQty);
-  const urgency = 0.5*remainingFrac + 0.3*(plan.capBindingPct/100) + 0.2*(timeFrac);
-  if (urgency > 0.7) tips.push(`High urgency → tighten to faster curve (front-load) and consider +${Math.min(5, 25 - order.reserveAuctionPct)}% auction reserve.`);
-  else if (urgency > 0.45) tips.push(`Moderate urgency → keep curve, monitor cap hits; pre-commit part to auction if spreads widen.`);
-
-  // Auction/TAL optimization
-  if (order.expectedAuctionVol > 0) {
-    const canDoAuction = plan.auctionAllowed;
-    if (canDoAuction < Math.floor((order.orderQty * order.reserveAuctionPct) / 100)) {
-      tips.push(`Auction capacity looks tight (allowed ${formatInt(canDoAuction)}). Consider shifting part of reserve to last two continuous slices or TAL.`);
-    } else {
-      tips.push(`Auction healthy. Ensure ≥ ${order.reserveAuctionPct}% held for auction; use TAL as safety valve if close imbalance spikes.`);
-    }
-  }
-
-  // VWAP guardrails
-  const marketVWAP =
-    order.currentVol > 0
-      ? (order.marketTurnover > 0 ? order.marketTurnover / order.currentVol : (order.marketVWAPInput || 0))
-      : (order.marketVWAPInput || 0);
-  const orderVWAP = order.orderExecQty > 0 ? order.orderExecNotional / order.orderExecQty : 0;
-  const perf = performanceBps(order.side, orderVWAP, marketVWAP);
-  if (Math.abs(perf) >= 25) {
-    if (order.side === "BUY") {
-      if (perf < 0) tips.push(`Underperforming VWAP by ${Math.abs(perf).toFixed(0)} bps → pause on spikes and favor passive in next slice.`);
-      else tips.push(`Beating VWAP by ${perf.toFixed(0)} bps → can relax slightly or keep steady if liquidity thins.`);
-    } else {
-      if (perf < 0) tips.push(`Underperforming VWAP by ${Math.abs(perf).toFixed(0)} bps → avoid chasing; favor auction participation if spread widens.`);
-      else tips.push(`Beating VWAP by ${perf.toFixed(0)} bps → consider clipping more in liquid moments.`);
-    }
-  }
-
-  // Participation discipline (INLINE)
-  if (order.execMode === "INLINE") {
-    if (behind) tips.push(`Behind target participation (${(plan.impliedPartRate*100).toFixed(1)}% vs ${(plan.targetPartRate*100).toFixed(1)}%) → increase next two slices by +10–15%.`);
-    if (ahead)  tips.push(`Ahead of target participation → ease for one slice unless liquidity is exceptional.`);
-  }
-
-  // Liquidity note
-  tips.push(`Liquidity regime: ${liquidity}.`);
-
-  return tips;
-}
-
-/* -------------------- VWAP widget -------------------- */
+/* -------------------- VWAP box -------------------- */
 function VWAPBox({ order }: { order: Order }) {
   const marketVWAP =
     order.currentVol > 0
@@ -557,51 +466,21 @@ function VWAPBox({ order }: { order: Order }) {
         ? order.marketTurnover / order.currentVol
         : order.marketVWAPInput || 0
       : order.marketVWAPInput || 0;
-
-  const orderVWAP =
-    order.orderExecQty > 0 ? order.orderExecNotional / order.orderExecQty : 0;
-
+  const orderVWAP = order.orderExecQty > 0 ? order.orderExecNotional / order.orderExecQty : 0;
   const perf = performanceBps(order.side, orderVWAP, marketVWAP);
-  const tag = Number.isFinite(perf) ? `${perf.toFixed(1)} bps` : "—";
   const color = perf > 0 ? "text-green-600" : perf < 0 ? "text-red-600" : "";
-
   return (
     <div className="grid md:grid-cols-4 gap-3 text-sm mt-2">
-      <HeaderStat
-        title="Market VWAP"
-        value={marketVWAP ? formatMoney(marketVWAP, 4) : "—"}
-      />
-      <HeaderStat
-        title="Order VWAP"
-        value={orderVWAP ? formatMoney(orderVWAP, 4) : "—"}
-      />
-      <HeaderStat
-        title="Performance (bps)"
-        value={<span className={color}>{tag}</span>}
-      />
-      <HeaderStat title="Executed Qty" value={formatInt(order.orderExecQty)} />
+      <HeaderStat title="Market VWAP" value={marketVWAP ? formatMoney(marketVWAP, 4) : "—"} />
+      <HeaderStat title="Order VWAP" value={orderVWAP ? formatMoney(orderVWAP, 4) : "—"} />
+      <HeaderStat title="Perf (bps)" value={<span className={color}>{Number.isFinite(perf) ? perf.toFixed(1) : "—"}</span>} />
+      <HeaderStat title="Exec Qty" value={formatInt(order.orderExecQty)} />
     </div>
   );
 }
 
-/* -------------------- Themed Planner Card -------------------- */
-function sideTheme(side: Side) {
-  return side === "BUY"
-    ? {
-        text: "text-emerald-700",
-        bgSoft: "bg-emerald-50",
-        border: "border-emerald-300",
-        strong: "bg-emerald-600",
-      }
-    : {
-        text: "text-rose-700",
-        bgSoft: "bg-rose-50",
-        border: "border-rose-300",
-        strong: "bg-rose-600",
-      };
-}
-
-function ColorPlannerCard({
+/* -------------------- Per-order Card -------------------- */
+function PlannerCard({
   order,
   onChange,
   onRemove,
@@ -612,75 +491,84 @@ function ColorPlannerCard({
   onRemove: () => void;
   onDuplicate: () => void;
 }) {
-  const theme = sideTheme(order.side);
+  const t = theme(order.side);
   const [clock, setClock] = useState(nowHHMMSS());
   useInterval(() => setClock(nowHHMMSS()), 1000);
 
-  // Recompute plan every render so ANY change refreshes outputs
+  // Apply market preset (per-order only)
+  function applyMarketPreset(m: MarketKey, startFromNow: boolean) {
+    const p = MARKET_PRESET[m];
+    const sStart = startFromNow ? nowHHMM() : p.start;
+    onChange({
+      ...order,
+      market: m,
+      startFromNow,
+      sessionStart: sStart,
+      sessionEnd: p.auction,
+      auctionStart: p.auction,
+      auctionEnd: p.auctionMatch,
+      talStart: p.talStart,
+      talEnd: p.talEnd,
+    });
+  }
+
   const plan = buildPlan(order);
+  const metrics = computeMetrics(order, plan);
+  const alertsList = buildAlerts(metrics, order);
+
   const totalPlanned = plan.contPlanned + plan.auctionPlanned;
   const remaining = Math.max(0, order.orderQty - totalPlanned);
-  const progress =
-    order.orderQty > 0
-      ? Math.min(100, Math.round((totalPlanned / order.orderQty) * 100))
-      : 0;
+  const progress = order.orderQty > 0 ? Math.min(100, Math.round((totalPlanned / order.orderQty) * 100)) : 0;
 
-  const liveIndex = plan.rows.findIndex((r: any) =>
-    withinSlice(new Date().toTimeString().slice(0, 5) + ":00", r.s, r.e)
-  );
-  const liveRef = useRef<HTMLTableRowElement | null>(null);
+  // Live slice + next clip suggestion
+  const liveIndex = plan.rows.findIndex((r) => {
+    const cur = new Date().toTimeString().slice(0, 5) + ":00";
+    return cur >= r.s && cur < r.e;
+  });
+  const liveSlice = liveIndex >= 0 ? plan.rows[liveIndex] : null;
+  let nextClip = 0;
+  if (liveSlice) {
+    const slicesLeft = Math.max(1, plan.rows.length - liveIndex);
+    const plannedBefore = plan.rows.slice(0, liveIndex).reduce((a, r) => a + r.suggestedQty, 0);
+    const remainingPlan = Math.max(0, order.orderQty - (plannedBefore + plan.auctionPlanned));
+    const base = Math.floor(remainingPlan / slicesLeft);
+    nextClip =
+      typeof liveSlice.maxAllowed === "number" ? Math.min(base, liveSlice.maxAllowed) : base;
+    nextClip = Math.max(0, nextClip);
+  }
 
-  const [showLiveOnly, setShowLiveOnly] = useState(false);
-  const visibleRows =
-    !showLiveOnly || liveIndex < 0
-      ? plan.rows
-      : plan.rows.filter((_: any, i: number) => i >= liveIndex && i <= liveIndex + 2);
-
-  // Reminders
-  const [toast, setToast] = useState<string | null>(null);
-  useInterval(
-    () => {
-      if (!order.remindersOn) return;
-      setToast("Time to update current volume / executed qty & expectations");
-      setTimeout(() => setToast(null), 3500);
-    },
-    order.remindEveryMins > 0 && order.remindersOn
-      ? order.remindEveryMins * 60 * 1000
-      : null
-  );
-
-  // CSV
-  const csvData = (() => {
-    const base = plan.rows.map((r: any) => ({
+  // CSV export
+  const csv = (() => {
+    const base = plan.rows.map((r) => ({
       Interval: r.interval,
       "Expected Market Vol": r.expMktVol,
       "Max Allowed": r.maxAllowed,
       "Suggested Qty": r.suggestedQty,
-      Notes: r.notes,
     }));
     base.push({
       Interval: "Auction",
       "Expected Market Vol": order.expectedAuctionVol,
       "Max Allowed": plan.auctionAllowed,
       "Suggested Qty": plan.auctionPlanned,
-      Notes: plan.talNote || "",
     });
     base.push({
       Interval: "Totals",
       "Expected Market Vol":
-        order.startVol +
-        order.currentVol +
-        order.expectedContVol +
-        order.expectedAuctionVol,
+        order.startVol + order.currentVol + order.expectedContVol + order.expectedAuctionVol,
       "Max Allowed": "—",
       "Suggested Qty": totalPlanned,
-      Notes: `Remaining unfilled: ${formatInt(remaining)}`,
     });
-    return toCSV(base);
+    const headers = Object.keys(base[0] || {});
+    const esc = (v: any) => {
+      const s = String(v ?? "");
+      return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+    };
+    return [headers.join(",")]
+      .concat(base.map((r) => headers.map((h) => esc((r as any)[h])).join(",")))
+      .join("\n");
   })();
-
   function downloadCSV() {
-    const blob = new Blob([csvData], { type: "text/csv;charset=utf-8;" });
+    const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
@@ -689,101 +577,87 @@ function ColorPlannerCard({
     URL.revokeObjectURL(url);
   }
 
-  // Execution Coach
-  const tips = coachTips(order, plan);
+  // Snapshots
+  function logSnapshot() {
+    const snap: Snapshot = {
+      at: nowHHMMSS(),
+      currentVol: order.currentVol,
+      expectedContVol: order.expectedContVol,
+      expectedAuctionVol: order.expectedAuctionVol,
+      orderExecQty: order.orderExecQty,
+      orderExecNotional: order.orderExecNotional,
+      marketTurnover: order.marketTurnover,
+      marketVWAPInput: order.marketVWAPInput,
+    };
+    onChange({ ...order, snapshots: [...order.snapshots, snap] });
+  }
 
   return (
-    <div className={`rounded-2xl shadow border ${theme.border} bg-white overflow-hidden`}>
-      <div className={`px-4 py-3 border-b ${theme.border} flex items-center justify-between`}>
+    <div className={`rounded-2xl shadow border ${t.border} bg-white overflow-hidden`}>
+      {/* Header */}
+      <div className={`px-4 py-3 border-b ${t.border} flex items-center justify-between`}>
         <div className="flex items-center gap-3">
-          <span className={`inline-flex items-center px-2.5 py-1 rounded-full text-xs font-semibold ${theme.bgSoft} ${theme.text}`}>
-            {order.side}
-          </span>
-          <div className="text-sm opacity-70">
-            Local time (CLT): <span className="font-mono">{clock}</span>
-          </div>
+          <span className={`inline-flex items-center px-2.5 py-1 rounded-full text-xs font-semibold ${t.bgSoft} ${t.text}`}>{order.side}</span>
+          <div className="text-sm opacity-70">Local time (CLT): <span className="font-mono">{clock}</span></div>
         </div>
         <div className="flex gap-2">
-          <button onClick={downloadCSV} className="px-3 py-2 rounded-xl bg-slate-900 text-white text-sm">
-            Export CSV
-          </button>
-          <button onClick={onDuplicate} className="px-3 py-2 rounded-xl border text-sm">
-            Duplicate
-          </button>
-          <button onClick={onRemove} className="px-3 py-2 rounded-xl border text-sm">
-            Remove
-          </button>
+          <button onClick={downloadCSV} className="px-3 py-2 rounded-xl bg-slate-900 text-white text-sm">Export CSV</button>
+          <button onClick={onDuplicate} className="px-3 py-2 rounded-xl border text-sm">Duplicate</button>
+          <button onClick={onRemove} className="px-3 py-2 rounded-xl border text-sm">Remove</button>
         </div>
       </div>
 
-      <div className="p-4 grid md:grid-cols-6 gap-3 items-end">
-        <HeaderStat
-          title="Name"
-          value={
-            <input
-              className="border rounded-xl px-2 py-1 w-full"
-              value={order.name}
-              onChange={(e) => onChange({ ...order, name: e.target.value })}
-            />
-          }
-        />
-        <HeaderStat title="Symbol" value={<span className="font-mono">{order.symbol}</span>} />
-        <HeaderStat title="Mode" value={order.execMode} />
-        <HeaderStat title="Cap" value={order.capMode === "PCT" ? `${order.maxPart}%` : "No cap"} />
-        <HeaderStat title="Order Qty" value={formatInt(order.orderQty)} />
-        <div className="flex flex-col gap-1">
-          <div className="text-xs opacity-60">Progress</div>
-          <div className="w-full h-2 rounded-full bg-slate-200 overflow-hidden">
-            <div className={`h-2 ${theme.strong}`} style={{ width: `${progress}%` }} />
-          </div>
-          <div className="text-xs opacity-60">
-            {progress}% planned · Remaining {formatInt(remaining)}
-          </div>
-        </div>
+      {/* Market preset row (per order) */}
+      <div className="px-4 py-2 flex flex-wrap items-center gap-2 text-sm">
+        <span className="opacity-70">Market:</span>
+        {(["Egypt", "Kuwait", "Qatar", "DFM", "ADX", "Saudi"] as MarketKey[]).map((m) => (
+          <button
+            key={m}
+            onClick={() => applyMarketPreset(m, !!order.startFromNow)}
+            className={`px-3 py-1.5 rounded-full border ${order.market === m ? "bg-slate-900 text-white" : "bg-white"}`}
+          >
+            {m}
+          </button>
+        ))}
+        <label className="flex items-center gap-2 ml-2">
+          <input
+            type="checkbox"
+            checked={!!order.startFromNow}
+            onChange={(e) => applyMarketPreset(order.market || "Qatar", e.target.checked)}
+          />
+          Start from now
+        </label>
+        <span className="text-xs opacity-60 ml-2">Applies to this order only.</span>
       </div>
 
-      {/* Diagnostics strip */}
-      <div className="px-4 grid md:grid-cols-4 gap-3">
-        <HeaderStat
-          title="Cap Binding"
-          value={`${plan.capBindingPct.toFixed(0)}% of slices`}
-        />
-        <HeaderStat
-          title="Implied Participation"
-          value={`${(plan.impliedPartRate * 100).toFixed(1)}%`}
-        />
-        <HeaderStat
-          title="Target Participation"
-          value={`${(plan.targetPartRate * 100).toFixed(1)}%`}
-        />
-        <HeaderStat
-          title="Auction Planned"
-          value={`${formatInt(plan.auctionPlanned)} / allowed ${formatInt(plan.auctionAllowed)}`}
-        />
+      {/* HUD row (metrics) */}
+      <div className="px-4 py-2 grid grid-cols-3 md:grid-cols-6 gap-2 text-xs">
+        <HeaderStat title="Target POV" value={(metrics.targetPOV*100).toFixed(1)+"%"} />
+        <HeaderStat title="Actual POV" value={(metrics.actualPOV*100).toFixed(1)+"%"} />
+        <HeaderStat title="POV Drift" value={(metrics.povDrift*100).toFixed(1)+"%"} />
+        <HeaderStat title="VWAP Slip" value={`${metrics.slipBps.toFixed(1)} bps`} />
+        <HeaderStat title="Cap Heat" value={(metrics.capHeat*100).toFixed(0)+"%"} />
+        <HeaderStat title="Urgency" value={(metrics.urgency*100).toFixed(0)} />
       </div>
 
-      {/* Coach tips */}
-      <div className="px-4 mt-2">
-        <div className="text-xs opacity-60 mb-1">Execution Coach</div>
-        <div className="flex flex-wrap gap-2">
-          {tips.map((t, i) => (
-            <span
-              key={i}
-              className={`text-xs px-2.5 py-1 rounded-full border ${theme.border} ${theme.bgSoft} ${theme.text}`}
-            >
-              {t}
-            </span>
-          ))}
-          {tips.length === 0 && (
-            <span className="text-xs px-2.5 py-1 rounded-full border bg-slate-50">
-              No special actions suggested.
-            </span>
-          )}
-        </div>
+      {/* Alerts + Next Action */}
+      <div className="px-4 py-2 flex flex-wrap gap-2">
+        {alertsList.length === 0 ? (
+          <span className="text-xs px-2.5 py-1 rounded-full bg-slate-100">All checks OK</span>
+        ) : alertsList.map((a, i) => (
+          <span key={i} className={`text-xs px-2.5 py-1 rounded-full ${a.severity==="danger"?"bg-red-100 text-red-700":a.severity==="warn"?"bg-yellow-100 text-yellow-700":"bg-slate-100"}`}>
+            {a.message}
+          </span>
+        ))}
+        {nextClip > 0 && (
+          <span className={`ml-auto text-xs px-2.5 py-1 rounded-full text-white ${t.strong}`}>
+            Next: {formatInt(nextClip)}
+          </span>
+        )}
       </div>
 
-      {/* Inputs & VWAP */}
-      <div className="px-4 pb-4 grid md:grid-cols-3 gap-4 mt-3">
+      {/* Compact inputs + VWAP */}
+      <div className="px-4 pb-4 grid md:grid-cols-3 gap-4">
         <div className="space-y-3">
           <h3 className="font-semibold">Order</h3>
           <label className="text-sm">
@@ -805,26 +679,20 @@ function ColorPlannerCard({
               <option value="SELL">SELL</option>
             </select>
           </label>
-          <IntInput
-            label="Order Qty (shares)"
-            value={order.orderQty}
-            onChange={(n) => onChange({ ...order, orderQty: n })}
-          />
-
+          <IntInput label="Order Qty (shares)" value={order.orderQty} onChange={(n) => onChange({ ...order, orderQty: n })} />
           <label className="text-sm">
-            Execution Mode
+            Mode
             <select
               className="mt-1 w-full border rounded-xl p-2"
               value={order.execMode}
               onChange={(e) => onChange({ ...order, execMode: e.target.value as ExecMode })}
             >
               <option value="OTD">OTD (time-sliced)</option>
-              <option value="INLINE">Inline with Volume</option>
+              <option value="INLINE">Inline (POV)</option>
             </select>
           </label>
-
           <label className="text-sm">
-            Cap Mode
+            Cap
             <select
               className="mt-1 w-full border rounded-xl p-2"
               value={order.capMode}
@@ -841,67 +709,27 @@ function ColorPlannerCard({
                 type="number"
                 className="mt-1 w-full border rounded-xl p-2"
                 value={order.maxPart}
-                onChange={(e) =>
-                  onChange({
-                    ...order,
-                    maxPart: Math.max(0, parseFloat(e.target.value || "0")),
-                  })
-                }
+                onChange={(e) => onChange({ ...order, maxPart: Math.max(0, parseFloat(e.target.value || "0")) })}
               />
             </label>
           )}
-
           <label className="text-sm">
             Reserve for Auction %
             <input
               type="number"
               className="mt-1 w-full border rounded-xl p-2"
               value={order.reserveAuctionPct}
-              onChange={(e) =>
-                onChange({
-                  ...order,
-                  reserveAuctionPct: Math.max(0, parseFloat(e.target.value || "0")),
-                })
-              }
+              onChange={(e) => onChange({ ...order, reserveAuctionPct: Math.max(0, parseFloat(e.target.value || "0")) })}
             />
           </label>
-
-          <label className="text-sm flex items-center gap-2 mt-2">
+          <label className="text-sm flex items-center gap-2">
             <input
               type="checkbox"
               checked={order.deferCompletion}
               onChange={(e) => onChange({ ...order, deferCompletion: e.target.checked })}
             />
-            <span>Do not complete before end / keep for auction</span>
+            Do not complete before end
           </label>
-
-          <div className="grid grid-cols-2 gap-3 mt-2">
-            <label className="text-sm">
-              Reminders
-              <select
-                className="mt-1 w-full border rounded-xl p-2"
-                value={order.remindersOn ? "on" : "off"}
-                onChange={(e) => onChange({ ...order, remindersOn: e.target.value === "on" })}
-              >
-                <option value="off">Off</option>
-                <option value="on">On</option>
-              </select>
-            </label>
-            <label className="text-sm">
-              Every (mins)
-              <input
-                type="number"
-                className="mt-1 w-full border rounded-xl p-2"
-                value={order.remindEveryMins}
-                onChange={(e) =>
-                  onChange({
-                    ...order,
-                    remindEveryMins: Math.max(1, parseInt(e.target.value || "1")),
-                  })
-                }
-              />
-            </label>
-          </div>
         </div>
 
         <div className="space-y-3">
@@ -967,12 +795,7 @@ function ColorPlannerCard({
                 type="number"
                 className="mt-1 w-full border rounded-xl p-2"
                 value={order.intervalMins}
-                onChange={(e) =>
-                  onChange({
-                    ...order,
-                    intervalMins: Math.max(1, parseInt(e.target.value || "1")),
-                  })
-                }
+                onChange={(e) => onChange({ ...order, intervalMins: Math.max(1, parseInt(e.target.value || "1")) })}
               />
             </label>
             <label className="text-sm">
@@ -982,92 +805,39 @@ function ColorPlannerCard({
                 value={order.curve}
                 onChange={(e) => onChange({ ...order, curve: e.target.value as Curve })}
               >
-                <option value="ucurve">U-curve (mid heavier)</option>
+                <option value="ucurve">U-curve</option>
                 <option value="equal">Equal</option>
               </select>
             </label>
           </div>
-
-          <h3 className="font-semibold mt-4">Market Volume</h3>
-          <div className="grid grid-cols-2 gap-3">
-            <IntInput
-              label="Start Volume (can be 0)"
-              value={order.startVol}
-              onChange={(n) => onChange({ ...order, startVol: n })}
-            />
-            <IntInput
-              label="Current Volume (cum)"
-              value={order.currentVol}
-              onChange={(n) => onChange({ ...order, currentVol: n })}
-            />
-            <IntInput
-              className="col-span-2"
-              label="Expected Additional Volume (continuous)"
-              value={order.expectedContVol}
-              onChange={(n) => onChange({ ...order, expectedContVol: n })}
-            />
-            <IntInput
-              className="col-span-2"
-              label="Expected Auction Volume"
-              value={order.expectedAuctionVol}
-              onChange={(n) => onChange({ ...order, expectedAuctionVol: n })}
-            />
-          </div>
         </div>
 
         <div className="space-y-3">
-          <h3 className="font-semibold">VWAP / Turnover Monitoring</h3>
-          <MoneyInput
-            label="Market Turnover (EGP)"
-            value={order.marketTurnover}
-            onNumberChange={(n) => onChange({ ...order, marketTurnover: n })}
-          />
-          <MoneyInput
-            label="OR Enter Market VWAP manually"
-            value={order.marketVWAPInput}
-            onNumberChange={(n) => onChange({ ...order, marketVWAPInput: n })}
-          />
-          <IntInput
-            label="Your Executed Qty (shares)"
-            value={order.orderExecQty}
-            onChange={(n) => onChange({ ...order, orderExecQty: n })}
-          />
-          <MoneyInput
-            label="Your Executed Notional (EGP)"
-            value={order.orderExecNotional}
-            onNumberChange={(n) => onChange({ ...order, orderExecNotional: n })}
-          />
+          <h3 className="font-semibold">Volumes & VWAP</h3>
+          <div className="grid grid-cols-2 gap-3">
+            <IntInput label="Start Vol (can be 0)" value={order.startVol} onChange={(n) => onChange({ ...order, startVol: n })} />
+            <IntInput label="Current Vol (cum)" value={order.currentVol} onChange={(n) => onChange({ ...order, currentVol: n })} />
+            <IntInput className="col-span-2" label="Expected Continuous Vol" value={order.expectedContVol} onChange={(n) => onChange({ ...order, expectedContVol: n })} />
+            <IntInput className="col-span-2" label="Expected Auction Vol" value={order.expectedAuctionVol} onChange={(n) => onChange({ ...order, expectedAuctionVol: n })} />
+          </div>
+          <MoneyInput label="Market Turnover" value={order.marketTurnover} onNumberChange={(n) => onChange({ ...order, marketTurnover: n })} />
+          <MoneyInput label="OR Enter Market VWAP" value={order.marketVWAPInput} onNumberChange={(n) => onChange({ ...order, marketVWAPInput: n })} />
+          <IntInput label="Your Executed Qty" value={order.orderExecQty} onChange={(n) => onChange({ ...order, orderExecQty: n })} />
+          <MoneyInput label="Your Executed Notional" value={order.orderExecNotional} onNumberChange={(n) => onChange({ ...order, orderExecNotional: n })} />
           <VWAPBox order={order} />
         </div>
       </div>
 
+      {/* Macros */}
+      <div className="px-4 py-2 flex gap-2">
+        <button onClick={()=>onChange({...order, maxPart: order.maxPart+2})} className="px-2 py-1 rounded bg-slate-200 text-xs">Raise Cap +2%</button>
+        <button onClick={()=>onChange({...order, reserveAuctionPct: order.reserveAuctionPct+5})} className="px-2 py-1 rounded bg-slate-200 text-xs">Shift +5% Auction</button>
+        <button onClick={logSnapshot} className={`ml-auto px-2.5 py-1.5 rounded-lg text-xs text-white ${t.strong}`}>Log snapshot</button>
+      </div>
+
       {/* Plan table */}
       <div className="px-4 pb-4">
-        <div className="flex items-center justify-between mb-2">
-          <div className="text-sm opacity-70">Plan</div>
-          <div className="flex items-center gap-3">
-            <label className="text-xs flex items-center gap-1">
-              <input
-                type="checkbox"
-                checked={showLiveOnly}
-                onChange={(e) => setShowLiveOnly(e.target.checked)}
-              />
-              Live slice only
-            </label>
-            {liveIndex >= 0 && (
-              <button
-                onClick={() =>
-                  liveRef.current?.scrollIntoView({ behavior: "smooth", block: "center" })
-                }
-                className={`px-2.5 py-1.5 rounded-lg text-xs text-white ${theme.strong}`}
-              >
-                Jump to Live Slice
-              </button>
-            )}
-          </div>
-        </div>
-
-        <div className="overflow-x-auto rounded-xl border">
+        <div className="overflow-x-auto rounded-xl border mb-3">
           <table className="w-full text-sm">
             <thead className="sticky top-0 bg-white">
               <tr className="text-left border-b">
@@ -1075,26 +845,18 @@ function ColorPlannerCard({
                 <th className="py-2 pr-2">Expected Mkt Vol</th>
                 <th className="py-2 pr-2">Max Allowed</th>
                 <th className="py-2 pr-2">Suggested Qty</th>
-                <th className="py-2 pr-2">Notes</th>
               </tr>
             </thead>
             <tbody>
-              {visibleRows.map((r: any, idx: number) => {
-                const i = showLiveOnly ? liveIndex + idx : idx;
-                const isLive = i === liveIndex;
+              {plan.rows.map((r) => {
+                const cur = new Date().toTimeString().slice(0, 5) + ":00";
+                const isLive = cur >= r.s && cur < r.e;
                 return (
-                  <tr
-                    key={`${r.interval}-${idx}`}
-                    ref={isLive ? liveRef : undefined}
-                    className={`border-b last:border-0 ${isLive ? `${theme.bgSoft} animate-pulse` : ""}`}
-                  >
-                    <td className={`py-2 pr-2 ${theme.text}`}>{r.interval}</td>
+                  <tr key={r.interval} className={`border-b last:border-0 ${isLive ? `${t.bgSoft} animate-pulse` : ""}`}>
+                    <td className={`py-2 pr-2 ${t.text}`}>{r.interval}</td>
                     <td className="py-2 pr-2">{formatInt(r.expMktVol)}</td>
-                    <td className="py-2 pr-2">
-                      {typeof r.maxAllowed === "number" ? formatInt(r.maxAllowed) : r.maxAllowed}
-                    </td>
+                    <td className="py-2 pr-2">{typeof r.maxAllowed === "number" ? formatInt(r.maxAllowed) : r.maxAllowed}</td>
                     <td className="py-2 pr-2 font-semibold">{formatInt(r.suggestedQty)}</td>
-                    <td className="py-2 pr-2">{r.notes}</td>
                   </tr>
                 );
               })}
@@ -1105,33 +867,70 @@ function ColorPlannerCard({
                 <td className="py-2 pr-2">{formatInt(order.expectedAuctionVol)}</td>
                 <td className="py-2 pr-2">{formatInt(plan.auctionAllowed)}</td>
                 <td className="py-2 pr-2 font-semibold">{formatInt(plan.auctionPlanned)}</td>
-                <td className="py-2 pr-2">{plan.talNote}</td>
               </tr>
             </tbody>
             <tfoot>
               <tr className="border-t">
                 <td className="py-2 pr-2 font-semibold">Totals</td>
                 <td className="py-2 pr-2">
-                  {formatInt(
-                    order.startVol +
-                      order.currentVol +
-                      order.expectedContVol +
-                      order.expectedAuctionVol
-                  )}
+                  {formatInt(order.startVol + order.currentVol + order.expectedContVol + order.expectedAuctionVol)}
                 </td>
                 <td className="py-2 pr-2">—</td>
-                <td className="py-2 pr-2 font-semibold">{formatInt(totalPlanned)}</td>
-                <td className="py-2 pr-2">Remaining unfilled: {formatInt(remaining)}</td>
+                <td className="py-2 pr-2 font-semibold">
+                  {formatInt(totalPlanned)} (Remain {formatInt(remaining)})
+                </td>
               </tr>
             </tfoot>
           </table>
+        </div>
+
+        {/* Snapshot history (compact) */}
+        <div className="rounded-xl border">
+          <div className="px-3 py-2 text-sm font-medium">Snapshots (latest first)</div>
+          <div className="overflow-x-auto">
+            <table className="w-full text-xs">
+              <thead className="bg-slate-50">
+                <tr className="text-left">
+                  <th className="p-2">Time</th>
+                  <th className="p-2">Cur Vol</th>
+                  <th className="p-2">Exp Cont</th>
+                  <th className="p-2">Exp Auction</th>
+                  <th className="p-2">Exec Qty</th>
+                  <th className="p-2">Exec Notional</th>
+                  <th className="p-2">Turnover</th>
+                  <th className="p-2">Manual VWAP</th>
+                </tr>
+              </thead>
+              <tbody>
+                {[...order.snapshots].reverse().map((s, i) => (
+                  <tr key={i} className="border-t">
+                    <td className="p-2 font-mono">{s.at}</td>
+                    <td className="p-2">{formatInt(s.currentVol)}</td>
+                    <td className="p-2">{formatInt(s.expectedContVol)}</td>
+                    <td className="p-2">{formatInt(s.expectedAuctionVol)}</td>
+                    <td className="p-2">{formatInt(s.orderExecQty)}</td>
+                    <td className="p-2">{formatMoney(s.orderExecNotional, 2)}</td>
+                    <td className="p-2">{formatMoney(s.marketTurnover, 2)}</td>
+                    <td className="p-2">{s.marketVWAPInput ? formatMoney(s.marketVWAPInput, 4) : "—"}</td>
+                  </tr>
+                ))}
+                {order.snapshots.length === 0 && (
+                  <tr>
+                    <td className="p-2 text-slate-500" colSpan={8}>
+                      No snapshots logged yet. Click “Log snapshot” whenever you update the fields to track progress & refine guidance.
+                    </td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          </div>
         </div>
       </div>
     </div>
   );
 }
 
-/* -------------------- Top Summary & Chips Filter -------------------- */
+/* -------------------- Aggregates & App Shell -------------------- */
 type Aggregates = {
   qtyTotal: number;
   plannedTotal: number;
@@ -1140,20 +939,18 @@ type Aggregates = {
   marketTurnoverApprox: number;
   marketVolTotal: number;
 };
-
 function aggregateOrders(orders: Order[]): Aggregates {
   return orders.reduce<Aggregates>(
     (agg, o) => {
-      const plan = buildPlan(o);
-      const planned = plan.contPlanned + plan.auctionPlanned;
+      const { contPlanned, auctionPlanned } = buildPlan(o);
+      const planned = contPlanned + auctionPlanned;
       const marketVWAP =
         o.currentVol > 0
           ? o.marketTurnover > 0
             ? o.marketTurnover / o.currentVol
             : o.marketVWAPInput || 0
           : o.marketVWAPInput || 0;
-      const turnoverApprox =
-        o.marketTurnover > 0 ? o.marketTurnover : marketVWAP * o.currentVol;
+      const turnoverApprox = o.marketTurnover > 0 ? o.marketTurnover : marketVWAP * o.currentVol;
       return {
         qtyTotal: agg.qtyTotal + o.orderQty,
         plannedTotal: agg.plannedTotal + planned,
@@ -1163,18 +960,10 @@ function aggregateOrders(orders: Order[]): Aggregates {
         marketVolTotal: agg.marketVolTotal + o.currentVol,
       };
     },
-    {
-      qtyTotal: 0,
-      plannedTotal: 0,
-      execQty: 0,
-      execNotional: 0,
-      marketTurnoverApprox: 0,
-      marketVolTotal: 0,
-    }
+    { qtyTotal: 0, plannedTotal: 0, execQty: 0, execNotional: 0, marketTurnoverApprox: 0, marketVolTotal: 0 }
   );
 }
-
-function SummaryBlock({
+function SummaryCard({
   title,
   tint,
   ag,
@@ -1185,37 +974,14 @@ function SummaryBlock({
   ag: Aggregates;
   side?: Side;
 }) {
-  const progress =
-    ag.qtyTotal > 0
-      ? Math.min(100, Math.round((ag.plannedTotal / ag.qtyTotal) * 100))
-      : 0;
+  const progress = ag.qtyTotal > 0 ? Math.min(100, Math.round((ag.plannedTotal / ag.qtyTotal) * 100)) : 0;
   const orderVWAP = ag.execQty > 0 ? ag.execNotional / ag.execQty : 0;
-  const marketVWAP =
-    ag.marketVolTotal > 0 ? ag.marketTurnoverApprox / ag.marketVolTotal : 0;
-
-  let perf = 0;
-  if (side) {
-    perf = performanceBps(side, orderVWAP, marketVWAP);
-  } else {
-    // For ALL, show neutral diff Order - Market
-    perf =
-      orderVWAP && marketVWAP ? ((orderVWAP - marketVWAP) / marketVWAP) * 10000 : 0;
-  }
+  const marketVWAP = ag.marketVolTotal > 0 ? ag.marketTurnoverApprox / ag.marketVolTotal : 0;
+  const perf = side ? performanceBps(side, orderVWAP, marketVWAP) : orderVWAP && marketVWAP ? ((orderVWAP - marketVWAP) / marketVWAP) * 10000 : 0;
 
   const color = perf > 0 ? "text-green-600" : perf < 0 ? "text-red-600" : "";
-
-  const bg =
-    tint === "emerald"
-      ? "bg-emerald-50"
-      : tint === "rose"
-      ? "bg-rose-50"
-      : "bg-slate-100";
-  const bar =
-    tint === "emerald"
-      ? "bg-emerald-600"
-      : tint === "rose"
-      ? "bg-rose-600"
-      : "bg-slate-600";
+  const bg = tint === "emerald" ? "bg-emerald-50" : tint === "rose" ? "bg-rose-50" : "bg-slate-100";
+  const bar = tint === "emerald" ? "bg-emerald-600" : tint === "rose" ? "bg-rose-600" : "bg-slate-600";
 
   return (
     <div className={`rounded-2xl p-4 ${bg} border`}>
@@ -1227,10 +993,7 @@ function SummaryBlock({
         <HeaderStat title="Total Qty" value={formatInt(ag.qtyTotal)} />
         <HeaderStat title="Planned" value={formatInt(ag.plannedTotal)} />
         <HeaderStat title="Executed" value={formatInt(ag.execQty)} />
-        <HeaderStat
-          title="Remaining"
-          value={formatInt(Math.max(0, ag.qtyTotal - ag.plannedTotal))}
-        />
+        <HeaderStat title="Remaining" value={formatInt(Math.max(0, ag.qtyTotal - ag.plannedTotal))} />
       </div>
       <div className="w-full h-2 rounded-full bg-white/60 overflow-hidden mt-2">
         <div className={`h-2 ${bar}`} style={{ width: `${progress}%` }} />
@@ -1243,21 +1006,19 @@ function SummaryBlock({
 }
 
 export default function App() {
-  const [orders, setOrders] = useState<Order[]>([
-    defaultOrder("BUY", 1),
-    defaultOrder("SELL", 1),
-  ]);
+  const [orders, setOrders] = useState<Order[]>([defaultOrder("BUY", 1), defaultOrder("SELL", 1)]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [notificationsEnabled, setNotificationsEnabled] = useState<boolean>(false);
 
-  const visibleOrders = selectedId ? orders.filter((o) => o.id === selectedId) : orders;
+  // Avoid spamming notifications: remember last danger alerts per order
+  const lastDangerRef = useRef<Record<string, string>>({});
 
-  // chips
+  const visible = selectedId ? orders.filter((o) => o.id === selectedId) : orders;
   const chips = [{ id: null as string | null, label: "ALL" }].concat(
     orders.map((o) => ({ id: o.id, label: o.name, side: o.side } as any))
   );
 
-  const addOrder = (side: Side) =>
-    setOrders((o) => [...o, defaultOrder(side, o.length + 1)]);
+  const addOrder = (side: Side) => setOrders((o) => [...o, defaultOrder(side, o.length + 1)]);
   const removeOrder = (id: string) => {
     setOrders((o) => o.filter((x) => x.id !== id));
     if (selectedId === id) setSelectedId(null);
@@ -1266,109 +1027,138 @@ export default function App() {
     setOrders((o) => {
       const src = o.find((x) => x.id === id);
       if (!src) return o;
-      const copy = {
-        ...src,
-        id: Math.random().toString(36).slice(2, 9),
-        name: src.name + " (copy)",
-      };
-      return [...o, copy];
+      return [...o, { ...src, id: Math.random().toString(36).slice(2, 9), name: src.name + " (copy)" }];
     });
-  const updateOrder = (id: string, next: Order) =>
-    setOrders((o) => o.map((x) => (x.id === id ? next : x)));
+  const updateOrder = (id: string, next: Order) => setOrders((o) => o.map((x) => (x.id === id ? next : x)));
 
-  // aggregates (filter-aware)
-  const allAgg = aggregateOrders(visibleOrders);
-  const buyAgg = aggregateOrders(visibleOrders.filter((o) => o.side === "BUY"));
-  const sellAgg = aggregateOrders(visibleOrders.filter((o) => o.side === "SELL"));
+  // Notifications for danger alerts (opt-in)
+  useEffect(() => {
+    if (!notificationsEnabled) return;
+    if (typeof window === "undefined" || !("Notification" in window)) return;
+    if (Notification.permission !== "granted") return;
+
+    const nextMap: Record<string, string> = {};
+    orders.forEach((o) => {
+      const m = computeMetrics(o, buildPlan(o));
+      const dangers = buildAlerts(m, o).filter((a) => a.severity === "danger");
+      const key = dangers.map((d) => d.kind + ":" + d.message).join("|");
+      nextMap[o.id] = key;
+
+      if (key && key !== lastDangerRef.current[o.id]) {
+        dangers.forEach((d) => {
+          new Notification(`${o.symbol} ${o.side}`, { body: d.message });
+        });
+      }
+    });
+    lastDangerRef.current = nextMap;
+  }, [orders, notificationsEnabled]);
+
+  // Dashboard aggregates (respect filter)
+  const agAll = aggregateOrders(visible);
+  const agBuy = aggregateOrders(visible.filter((o) => o.side === "BUY"));
+  const agSell = aggregateOrders(visible.filter((o) => o.side === "SELL"));
 
   return (
     <div className="min-h-screen bg-slate-50 text-slate-900">
-      {/* Sticky summary */}
-      <div className="sticky top-0 z-20 backdrop-blur bg-slate-50/80 border-b">
-        <div className="max-w-7xl mx-auto p-4 grid gap-4">
-          <div className="flex items-center justify-between">
-            <h1 className="text-xl font-bold">OTD / INLINE Execution Planner</h1>
-            <div className="flex gap-2">
-              <button
-                onClick={() => addOrder("BUY")}
-                className="px-3 py-2 rounded-xl bg-emerald-600 text-white text-sm"
-              >
-                + Add BUY
-              </button>
-              <button
-                onClick={() => addOrder("SELL")}
-                className="px-3 py-2 rounded-xl bg-rose-600 text-white text-sm"
-              >
-                + Add SELL
-              </button>
+      {/* Orders Rail */}
+      <div className="fixed left-0 top-16 bottom-0 w-40 bg-white border-r overflow-y-auto">
+        {orders.map(o => {
+          const m = computeMetrics(o, buildPlan(o));
+          const urgent = Math.round(m.urgency*100);
+          return (
+            <button key={o.id} onClick={() => setSelectedId(o.id)}
+              className={`block w-full text-left px-3 py-2 border-b ${selectedId===o.id?"bg-slate-200":""}`}>
+              <div className="font-semibold text-xs">{o.symbol}</div>
+              <div className={`text-${o.side==="BUY"?"emerald":"rose"}-600 text-xs`}>{o.side}</div>
+              <div className="text-xs">Urg {urgent}</div>
+            </button>
+          );
+        })}
+      </div>
+
+      <div className="ml-40">
+        {/* Sticky Dashboard */}
+        <div className="sticky top-0 z-20 backdrop-blur bg-slate-50/80 border-b">
+          <div className="max-w-7xl mx-auto p-4 grid gap-4">
+            <div className="flex items-center justify-between">
+              <h1 className="text-xl font-bold">Execution Planner</h1>
+              <div className="flex gap-2">
+                <button onClick={() => addOrder("BUY")} className="px-3 py-2 rounded-xl bg-emerald-600 text-white text-sm">+ Add BUY</button>
+                <button onClick={() => addOrder("SELL")} className="px-3 py-2 rounded-xl bg-rose-600 text-white text-sm">+ Add SELL</button>
+                <button
+                  onClick={() => {
+                    if (typeof window !== "undefined" && "Notification" in window) {
+                      Notification.requestPermission().then(p => {
+                        setNotificationsEnabled(p === "granted");
+                      });
+                    }
+                  }}
+                  className="px-3 py-2 rounded-xl border text-sm"
+                >
+                  {notificationsEnabled ? "Alerts On" : "Enable Alerts"}
+                </button>
+              </div>
+            </div>
+
+            {/* Summary */}
+            <div className="grid md:grid-cols-3 gap-3">
+              <SummaryCard title="ALL Orders" tint="slate" ag={agAll} />
+              <SummaryCard title="BUY" tint="emerald" ag={agBuy} side="BUY" />
+              <SummaryCard title="SELL" tint="rose" ag={agSell} side="SELL" />
+            </div>
+
+            {/* Chips Filter */}
+            <div className="flex flex-wrap gap-2">
+              {chips.map((c: any) => {
+                const active = selectedId === c.id;
+                const isBuy = c.side === "BUY";
+                const isSell = c.side === "SELL";
+                const color = active
+                  ? "bg-slate-900 text-white"
+                  : isBuy
+                  ? "bg-emerald-50 text-emerald-700"
+                  : isSell
+                  ? "bg-rose-50 text-rose-700"
+                  : "bg-white text-slate-700";
+                const border = isBuy ? "border-emerald-200" : isSell ? "border-rose-200" : "border-slate-200";
+                return (
+                  <button
+                    key={String(c.id ?? "ALL")}
+                    onClick={() => setSelectedId(c.id)}
+                    className={`px-3 py-1.5 rounded-full text-xs border ${color} ${border}`}
+                  >
+                    {c.label}
+                  </button>
+                );
+              })}
             </div>
           </div>
-
-          <div className="grid md:grid-cols-3 gap-3">
-            <SummaryBlock title="ALL Orders" tint="slate" ag={allAgg} />
-            <SummaryBlock title="BUY" tint="emerald" ag={buyAgg} side="BUY" />
-            <SummaryBlock title="SELL" tint="rose" ag={sellAgg} side="SELL" />
-          </div>
-
-          {/* Chips filter bar */}
-          <div className="flex flex-wrap gap-2">
-            {chips.map((c: any) => {
-              const active = selectedId === c.id;
-              const isBuy = c.side === "BUY";
-              const isSell = c.side === "SELL";
-              const color = active
-                ? "bg-slate-900 text-white"
-                : isBuy
-                ? "bg-emerald-50 text-emerald-700"
-                : isSell
-                ? "bg-rose-50 text-rose-700"
-                : "bg-white text-slate-700";
-              const border = isBuy
-                ? "border-emerald-200"
-                : isSell
-                ? "border-rose-200"
-                : "border-slate-200";
-              return (
-                <button
-                  key={String(c.id ?? "ALL")}
-                  onClick={() => setSelectedId(c.id)}
-                  className={`px-3 py-1.5 rounded-full text-xs border ${color} ${border}`}
-                >
-                  {c.label}
-                </button>
-              );
-            })}
-          </div>
         </div>
-      </div>
 
-      {/* Cards list */}
-      <div className="max-w-7xl mx-auto p-4 grid gap-5">
-        {visibleOrders.map((o) => (
-          <ColorPlannerCard
-            key={o.id}
-            order={o}
-            onChange={(n) => updateOrder(o.id, n)}
-            onRemove={() => removeOrder(o.id)}
-            onDuplicate={() => duplicateOrder(o.id)}
-          />
-        ))}
-        {visibleOrders.length === 0 && (
-          <div className="text-sm text-slate-500">No orders selected.</div>
-        )}
-      </div>
+        {/* Orders */}
+        <div className="max-w-7xl mx-auto p-4 grid gap-5">
+          {visible.map((o) => (
+            <PlannerCard
+              key={o.id}
+              order={o}
+              onChange={(n) => updateOrder(o.id, n)}
+              onRemove={() => removeOrder(o.id)}
+              onDuplicate={() => duplicateOrder(o.id)}
+            />
+          ))}
+          {visible.length === 0 && <div className="text-sm text-slate-500">No orders selected.</div>}
+        </div>
 
-      {/* Self-tests (console) */}
-      <div className="max-w-7xl mx-auto p-4">
-        <div className="bg-white rounded-2xl shadow p-4 text-sm">
-          <div className="font-semibold">Built-in Self Tests</div>
-          <pre className="text-xs bg-slate-50 p-3 rounded-xl overflow-x-auto">{`console.assert(minutesBetween('09:30','10:00') === 30, 'minutesBetween failed');
-console.assert(addMinutes('09:30', 30) === '10:00', 'addMinutes failed');
-const ts = timeSlices('09:30','10:30',30); console.assert(ts.length===2 && ts[0].s==='09:30' && ts[1].e==='10:30', 'timeSlices failed');
-const w1 = equalWeights(4); console.assert(Math.abs(w1.reduce((a,b)=>a+b,0)-1) < 1e-9, 'equalWeights sum');
-const w2 = uCurveWeights(5); console.assert(Math.abs(w2.reduce((a,b)=>a+b,0)-1) < 1e-9, 'uCurveWeights sum');
-console.assert(/[",\\n]/.test('a,b'), 'toCSV regex check');
-console.assert(toCSV([{A:'a',B:'b'},{A:'1',B:'2'}]).includes('A,B'), 'toCSV header');`}</pre>
+        {/* Quick sanity tests */}
+        <div className="max-w-7xl mx-auto p-4">
+          <div className="bg-white rounded-2xl shadow p-4 text-sm">
+            <div className="font-semibold">Built-in Self Tests</div>
+            <pre className="text-xs bg-slate-50 p-3 rounded-xl overflow-x-auto">{`console.assert(minutesBetween('09:30','10:00') === 30, 'minutesBetween');
+console.assert(addMinutes('09:30', 30) === '10:00', 'addMinutes');
+const ts = timeSlices('09:30','10:30',30); console.assert(ts.length===2 && ts[0].s==='09:30' && ts[1].e==='10:30', 'timeSlices');
+const w1 = equalWeights(4); console.assert(Math.abs(w1.reduce((a,b)=>a+b,0)-1) < 1e-9, 'equal sum');
+const w2 = uCurveWeights(5); console.assert(Math.abs(w2.reduce((a,b)=>a+b,0)-1) < 1e-9, 'u sum');`}</pre>
+          </div>
         </div>
       </div>
     </div>
