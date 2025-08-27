@@ -2,12 +2,12 @@ import React, { useEffect, useRef, useState } from "react";
 
 /**
 ======================================================================
-* Execution Planner — v2 with Proactive Guidance & Evaluation
-* - NEW: Post-Trade Report Card with Planned vs. Actual Execution Chart
-* - NEW: Live Pacing Indicator (Ahead/Behind Schedule)
-* - NEW: "Required Rate to Catch Up" advisory metric
-* - NEW: Market Impact warnings on high-participation intervals
-* - Collapsible sections and conditional UI for speed and clarity
+* Execution Planner — v2.1 (Corrected)
+* - FIX: Corrected JSX structure in PlannerCard to resolve build error.
+* - Post-Trade Report Card with Planned vs. Actual Execution Chart
+* - Live Pacing Indicator (Ahead/Behind Schedule)
+* - "Required Rate to Catch Up" advisory metric
+* - Market Impact warnings on high-participation intervals
 ====================================================================== */
 
 type ExecMode = "OTD" | "INLINE";
@@ -234,8 +234,8 @@ function buildPlan(order: Order): BuiltPlan {
     let remaining = targetContinuousQty;
     let cum = 0;
     return slices.map((slice, i) => {
-      const sliceVol = Math.max(0, contVolPerSlice[i]);
-      let base = Math.floor(weights[i] * targetContinuousQty);
+      const sliceVol = Math.max(0, contVolPerSlice[i] ?? 0);
+      let base = Math.floor((weights[i] ?? 0) * targetContinuousQty);
       base = Math.min(base, remaining);
       let suggested = applyCap(order.capMode, order.maxPart, base, sliceVol);
       const isLast = i === slices.length - 1;
@@ -267,12 +267,12 @@ function buildPlan(order: Order): BuiltPlan {
     return { rows, contPlanned, auctionAllowed, auctionPlanned, accumSuggested: contPlanned + auctionPlanned };
   }
 
-  // INLINE mode logic... (simplified for brevity, main logic unchanged)
+  // INLINE mode logic...
   const expectedTotalVol = order.currentVol + order.expectedContVol + order.expectedAuctionVol;
   const pov = expectedTotalVol > 0 ? Math.min(1, order.orderQty / expectedTotalVol) : 0;
   let cum = 0;
   const rows = slices.map((slice, i) => {
-    const sliceVol = Math.max(0, contVolPerSlice[i]);
+    const sliceVol = Math.max(0, contVolPerSlice[i] ?? 0);
     const base = Math.floor(sliceVol * pov);
     const suggested = applyCap(order.capMode, order.maxPart, base, sliceVol);
     cum += suggested;
@@ -343,12 +343,11 @@ function buildAlerts(order: Order, m: ReturnType<typeof computeMetrics>) {
   if (order.currentVol === 0 && order.startVol === 0) alerts.push("Missing market volume");
   if (m.liveRow && m.liveRow.impactRisk) alerts.push("Impact risk on live slice");
   if (m.coverage < 0.95) alerts.push("Coverage risk: plan < 95% of order");
-  if (m.requiredRate > IMPACT_WARNING_THRESHOLD * 1.5 * 100) alerts.push("High required rate to catch up");
+  if (m.requiredRate > IMPACT_WARNING_THRESHOLD * 1.5 * 100) alerts.push(`High required rate (${m.requiredRate.toFixed(0)}%)`);
   return alerts;
 }
 
 /* -------------------- Small UI atoms & New Components -------------------- */
-// (Existing atoms like HeaderStat, IntInput, etc. are unchanged)
 function HeaderStat({ title, value }: { title: string; value: React.ReactNode }) {
   return (
     <div className="p-3 rounded-xl bg-slate-100">
@@ -357,27 +356,13 @@ function HeaderStat({ title, value }: { title: string; value: React.ReactNode })
     </div>
   );
 }
-function IntInput({
-  label,
-  value,
-  onChange,
-  className,
-}: {
-  label?: string;
-  value: number;
-  onChange: (n: number) => void;
-  className?: string;
-}) {
+function IntInput({ label, value, onChange, className }: { label?: string; value: number; onChange: (n: number) => void; className?: string }) {
   const [draft, setDraft] = useState(formatInt(value));
   useEffect(() => setDraft(formatInt(value)), [value]);
   return (
     <label className={`text-sm ${className || ""}`}>
       {label}
-      <input
-        inputMode="numeric"
-        pattern="[0-9]*"
-        className="mt-1 w-full border rounded-xl p-2"
-        value={draft}
+      <input inputMode="numeric" pattern="[0-9]*" className="mt-1 w-full border rounded-xl p-2" value={draft}
         onChange={(e) => {
           const n = parseIntSafe(e.target.value);
           setDraft(formatInt(n));
@@ -387,28 +372,13 @@ function IntInput({
     </label>
   );
 }
-function MoneyInput({
-  label,
-  value,
-  onNumberChange,
-  className,
-  decimals = 4,
-}: {
-  label?: string;
-  value: number;
-  onNumberChange: (n: number) => void;
-  className?: string;
-  decimals?: number;
-}) {
+function MoneyInput({ label, value, onNumberChange, className, decimals = 4 }: { label?: string; value: number; onNumberChange: (n: number) => void; className?: string; decimals?: number }) {
   const [draft, setDraft] = useState(value === 0 ? "" : String(value));
   useEffect(() => setDraft(value === 0 ? "" : String(value)), [value]);
   return (
     <label className={`text-sm ${className || ""}`}>
       {label}
-      <input
-        inputMode="decimal"
-        className="mt-1 w-full border rounded-xl p-2"
-        value={draft}
+      <input inputMode="decimal" className="mt-1 w-full border rounded-xl p-2" value={draft}
         onChange={(e) => {
           const next = parseMoneySafeAllowTyping(e.target.value);
           setDraft(next);
@@ -434,7 +404,7 @@ function theme(side: Side) {
 }
 
 function PacingIndicator({ pacing, requiredRate }: { pacing: number; requiredRate: number }) {
-  if (!isFinite(pacing) || pacing === 0) return null;
+  if (!isFinite(pacing)) return null;
   const status = pacing > 5 ? "Ahead" : pacing < -5 ? "Behind" : "On Track";
   const color = status === "Ahead" ? "text-green-600" : status === "Behind" ? "text-amber-600" : "text-slate-600";
 
@@ -460,17 +430,23 @@ function ExecutionChart({ order, plan, t }: { order: Order; plan: BuiltPlan, t: 
   const totalDuration = minutesBetween(order.sessionStart, order.sessionEnd);
   if (totalDuration <= 0) return <div>Invalid session times for chart.</div>
 
-  const plannedPoints = plan.rows.map(row => {
-    const timePct = minutesBetween(order.sessionStart, row.e) / totalDuration;
+  const plannedPoints = [{x:0, y:chartHeight}, ...plan.rows.map(row => {
+    const timePct = Math.max(0, minutesBetween(order.sessionStart, row.e) / totalDuration);
     const qtyPct = row.cumSuggested / order.orderQty;
     return { x: timePct * chartWidth, y: chartHeight - qtyPct * chartHeight };
-  });
+  })];
 
   const actualPoints = [{x:0, y:chartHeight}, ...order.snapshots.map(snap => {
-    const timePct = minutesBetween(order.sessionStart, snap.at.slice(0, 5)) / totalDuration;
+    const timePct = Math.max(0, minutesBetween(order.sessionStart, snap.at.slice(0, 5)) / totalDuration);
     const qtyPct = snap.orderExecQty / order.orderQty;
     return { x: timePct * chartWidth, y: chartHeight - qtyPct * chartHeight };
   })];
+   if (order.completed && order.orderExecQty > 0) {
+      const lastSnap = order.snapshots[order.snapshots.length-1];
+      const timePct = lastSnap ? Math.max(0, minutesBetween(order.sessionStart, lastSnap.at.slice(0,5)) / totalDuration) : 1;
+      actualPoints.push({x: timePct * chartWidth, y: chartHeight - (order.orderExecQty / order.orderQty) * chartHeight});
+  }
+
 
   const toPath = (points: { x: number; y: number }[]) =>
     "M " + points.map(p => `${p.x.toFixed(2)} ${p.y.toFixed(2)}`).join(" L ");
@@ -479,11 +455,8 @@ function ExecutionChart({ order, plan, t }: { order: Order; plan: BuiltPlan, t: 
     <div className="mt-4">
       <h4 className="font-semibold mb-2">Planned vs. Actual Execution</h4>
       <svg viewBox={`0 0 ${chartWidth} ${chartHeight}`} className="w-full h-auto border rounded-lg bg-white">
-        {/* Planned Path */}
         <path d={toPath(plannedPoints)} strokeDasharray="4" className="stroke-slate-400" fill="none" strokeWidth="2" />
-        {/* Actual Path */}
         <path d={toPath(actualPoints)} className={t.stroke} fill="none" strokeWidth="2" />
-        {/* Legend */}
         <g transform="translate(10, 10)">
           <rect x="0" y="0" width="10" height="10" className="fill-slate-400" />
           <text x="15" y="9" className="text-[8px] fill-slate-600">Planned</text>
@@ -509,16 +482,11 @@ function PostTradeReportCard({ order, plan, metrics }: { order: Order; plan: Bui
       <ExecutionChart order={order} plan={plan} t={t} />
       <div className="mt-4">
         <h4 className="font-semibold mb-2">Decision Journal (Snapshots)</h4>
-        {/* Simplified snapshot view for report */}
-        <div className="overflow-x-auto rounded-xl border">
+        <div className="overflow-x-auto rounded-xl border max-h-48">
           <table className="w-full text-xs">
-            {/* Snapshot table from original code can be reused here */}
-             <thead className="bg-slate-50">
+             <thead className="bg-slate-50 sticky top-0">
                   <tr className="text-left">
-                    <th className="p-2">Time</th>
-                    <th className="p-2">Exec Qty</th>
-                    <th className="p-2">Exec Notional</th>
-                    <th className="p-2">Cur Vol</th>
+                    <th className="p-2">Time</th><th className="p-2">Exec Qty</th><th className="p-2">Exec Notional</th><th className="p-2">Cur Vol</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -530,8 +498,259 @@ function PostTradeReportCard({ order, plan, metrics }: { order: Order; plan: Bui
                       <td className="p-2">{formatInt(s.currentVol)}</td>
                     </tr>
                   ))}
+                  {order.snapshots.length === 0 && (
+                    <tr><td colSpan={4} className="p-4 text-center text-slate-500">No snapshots were logged for this order.</td></tr>
+                  )}
                 </tbody>
           </table>
         </div>
       </div>
     </div>
+  );
+}
+function VWAPBox({ order }: { order: Order }) {
+  const marketVWAP =
+    order.currentVol > 0
+      ? order.marketTurnover > 0 ? order.marketTurnover / order.currentVol : order.marketVWAPInput || 0
+      : order.marketVWAPInput || 0;
+  const orderVWAP = order.orderExecQty > 0 ? order.orderExecNotional / order.orderExecQty : 0;
+  const perf = performanceBps(order.side, orderVWAP, marketVWAP);
+  const color = perf > 0 ? "text-green-600" : perf < 0 ? "text-red-600" : "";
+  return (
+    <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-sm">
+      <HeaderStat title="Market VWAP" value={marketVWAP ? formatMoney(marketVWAP, 4) : "—"} />
+      <HeaderStat title="Order VWAP" value={orderVWAP ? formatMoney(orderVWAP, 4) : "—"} />
+      <HeaderStat title="Perf (bps)" value={<span className={color}>{Number.isFinite(perf) ? perf.toFixed(1) : "—"}</span>} />
+      <HeaderStat title="Exec Qty" value={formatInt(order.orderExecQty)} />
+    </div>
+  );
+}
+
+function TradeSimulator({ order, marketVWAP }: { order: Order; marketVWAP: number }) {
+  const [whatifQtyStr, setWhatifQtyStr] = useState("");
+  const [whatifPriceStr, setWhatifPriceStr] = useState("");
+  const whatifQty = parseIntSafe(whatifQtyStr);
+  const whatifPrice = toNumberOrZero(whatifPriceStr);
+  const currentVWAP = order.orderExecQty > 0 ? order.orderExecNotional / order.orderExecQty : 0;
+  const currentCompletion = order.orderQty > 0 ? (order.orderExecQty / order.orderQty) * 100 : 0;
+  const currentSlip = performanceBps(order.side, currentVWAP, marketVWAP);
+  let newVWAP = currentVWAP;
+  let newCompletion = currentCompletion;
+  let newSlip = currentSlip;
+  const showResults = whatifQty > 0 && whatifPrice > 0;
+  if (showResults) {
+    const newExecQty = order.orderExecQty + whatifQty;
+    const newExecNotional = order.orderExecNotional + whatifQty * whatifPrice;
+    newVWAP = newExecQty > 0 ? newExecNotional / newExecQty : 0;
+    newCompletion = order.orderQty > 0 ? (newExecQty / order.orderQty) * 100 : 0;
+    newSlip = performanceBps(order.side, newVWAP, marketVWAP);
+  }
+  const getChangeColor = (key: "vwap" | "completion" | "slip", current: number, next: number) => {
+    const diff = next - current;
+    if (!isFinite(diff) || diff === 0) return "text-slate-500";
+    if (key === "completion" || key === "slip") return diff > 0 ? "text-green-600" : "text-red-600";
+    if (order.side === "BUY") return diff < 0 ? "text-green-600" : "text-red-600";
+    return diff > 0 ? "text-green-600" : "text-red-600";
+  };
+  return (
+    <div className="p-3 rounded-xl bg-slate-50 border mt-4">
+      <h4 className="font-semibold text-sm">VWAP Impact Calculator</h4>
+      <div className="grid grid-cols-2 gap-3 mt-2">
+        <label className="text-sm"> What-if Qty
+          <input className="mt-1 w-full border rounded-xl p-2" value={formatInt(whatifQty)} onChange={(e) => setWhatifQtyStr(e.target.value)} placeholder="e.g., 100000" inputMode="numeric"/>
+        </label>
+        <label className="text-sm"> What-if Price
+          <input className="mt-1 w-full border rounded-xl p-2" value={whatifPriceStr} onChange={(e) => setWhatifPriceStr(parseMoneySafeAllowTyping(e.target.value))} placeholder="e.g., 15.25" inputMode="decimal"/>
+        </label>
+      </div>
+      {showResults && (
+        <>
+          <hr className="my-2 border-slate-200" />
+          <div className="text-xs space-y-1 font-mono">
+            <div> <span className="opacity-70">New Order VWAP: </span> {currentVWAP.toFixed(4)} →{" "} <strong className={getChangeColor("vwap", currentVWAP, newVWAP)}>{newVWAP.toFixed(4)}</strong> </div>
+            <div> <span className="opacity-70">New Completion: </span> {currentCompletion.toFixed(1)}% →{" "} <strong className={getChangeColor("completion", currentCompletion, newCompletion)}>{newCompletion.toFixed(1)}%</strong> </div>
+            <div> <span className="opacity-70">New Slip (bps): </span> {Number.isFinite(currentSlip) ? currentSlip.toFixed(1) : "—"} →{" "} <strong className={getChangeColor("slip", currentSlip, newSlip)}>{Number.isFinite(newSlip) ? newSlip.toFixed(1) : "—"}</strong> </div>
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+/* -------------------- Main Per-order Card -------------------- */
+function PlannerCard({ order, onChange, onRemove, onDuplicate, alertsOn }: { order: Order; onChange: (o: Order) => void; onRemove: () => void; onDuplicate: () => void; alertsOn: boolean; }) {
+  const t = theme(order.side);
+  const [clock, setClock] = useState(nowHHMMSS());
+  useInterval(() => setClock(nowHHMMSS()), 1000);
+  const plan = buildPlan(order);
+  const metrics = computeMetrics(order, plan);
+  const alerts = buildAlerts(order, metrics);
+  const [showInputs, setShowInputs] = useState(true);
+  const [showDetails, setShowDetails] = useState(false);
+  function logSnapshot() {
+    const snap: Snapshot = {
+      at: nowHHMMSS(),
+      currentVol: order.currentVol,
+      expectedContVol: order.expectedContVol,
+      expectedAuctionVol: order.expectedAuctionVol,
+      orderExecQty: order.orderExecQty,
+      orderExecNotional: order.orderExecNotional,
+      marketTurnover: order.marketTurnover,
+      marketVWAPInput: order.marketVWAPInput,
+    };
+    onChange({ ...order, snapshots: [...order.snapshots, snap] });
+  }
+
+  return (
+    <div className={`rounded-2xl shadow border ${t.border} bg-white overflow-hidden`}>
+      <div className={`px-4 py-3 border-b ${t.border} flex items-center justify-between`}>
+        <div className="flex items-center gap-3">
+          <span className={`inline-flex items-center px-2.5 py-1 rounded-full text-xs font-semibold ${t.bgSoft} ${t.text}`}>{order.side}</span>
+          <div className="font-semibold">{order.name} ({order.symbol})</div>
+        </div>
+        <div className="flex gap-2">
+          <button onClick={() => onChange({ ...order, completed: !order.completed })} className={`px-3 py-2 rounded-xl text-sm ${order.completed ? 'bg-green-600 text-white' : 'bg-slate-900 text-white'}`}>
+            {order.completed ? "✓ Re-open" : "Mark Completed"}
+          </button>
+          <button onClick={onDuplicate} className="px-3 py-2 rounded-xl border text-sm">Duplicate</button>
+          <button onClick={onRemove} className="px-3 py-2 rounded-xl border text-sm text-red-600">Remove</button>
+        </div>
+      </div>
+
+      {order.completed ? (
+        <PostTradeReportCard order={order} plan={plan} metrics={metrics} />
+      ) : (
+        <>
+          <div className="p-4 grid grid-cols-2 md:grid-cols-4 gap-3">
+            <HeaderStat title="Suggested Accum" value={formatInt(metrics.suggestedAccum)} />
+            <HeaderStat title="Executed Accum" value={formatInt(metrics.executedAccum)} />
+            <HeaderStat title="Completion %" value={`${metrics.completionPct.toFixed(1)}%`} />
+            <HeaderStat title="VWAP Slip" value={`${Number.isFinite(metrics.slipBps) ? metrics.slipBps.toFixed(1) : '—'} bps`} />
+          </div>
+          <div className="px-4 pb-2 flex flex-wrap items-center gap-2">
+            {alerts.map((a, i) => ( <span key={i} className={`text-xs px-2.5 py-1 rounded-full border ${t.border} ${t.bgSoft} ${t.text}`}>⚠️ {a}</span> ))}
+            <div className="ml-auto"> <PacingIndicator pacing={metrics.pacing} requiredRate={metrics.requiredRate} /> </div>
+          </div>
+
+          <div className="px-4 pt-2">
+            <button onClick={() => setShowInputs(s => !s)} className="text-xs border rounded px-2 py-1 w-full bg-slate-50 hover:bg-slate-100 flex items-center justify-center gap-2">
+              {showInputs ? 'Hide Inputs & Settings' : 'Show Inputs & Settings'}
+            </button>
+          </div>
+          {showInputs && (
+            <div className="px-4 pb-4 pt-2 grid grid-cols-1 md:grid-cols-3 gap-4 border-t mt-2">
+               {/* This is the full, restored input section */}
+              <div className="space-y-3">
+                <h3 className="font-semibold">Order</h3>
+                <IntInput label="Order Qty" value={order.orderQty} onChange={(n) => onChange({ ...order, orderQty: n })} />
+                <label className="text-sm">Mode
+                    <select className="mt-1 w-full border rounded-xl p-2" value={order.execMode} onChange={(e) => onChange({ ...order, execMode: e.target.value as ExecMode })}>
+                        <option value="OTD">OTD (time-sliced)</option><option value="INLINE">Inline (POV)</option>
+                    </select>
+                </label>
+                <label className="text-sm">Cap
+                    <select className="mt-1 w-full border rounded-xl p-2" value={order.capMode} onChange={(e) => onChange({ ...order, capMode: e.target.value as CapMode })}>
+                        <option value="PCT">Max % of Volume</option><option value="NONE">No Volume Cap</option>
+                    </select>
+                </label>
+                {order.capMode === "PCT" && ( <label className="text-sm">Max Part %<input type="number" className="mt-1 w-full border rounded-xl p-2" value={order.maxPart} onChange={(e) => onChange({ ...order, maxPart: Math.max(0, parseFloat(e.target.value || "0")) })}/></label> )}
+                <label className="text-sm">Reserve Auction %<input type="number" className="mt-1 w-full border rounded-xl p-2" value={order.reserveAuctionPct} onChange={(e) => onChange({ ...order, reserveAuctionPct: Math.max(0, parseFloat(e.target.value || "0")) })}/></label>
+              </div>
+              <div className="space-y-3">
+                <h3 className="font-semibold">Volumes</h3>
+                <IntInput label="Current Vol (cum)" value={order.currentVol} onChange={(n) => onChange({ ...order, currentVol: n })} />
+                <IntInput label="Expected Continuous Vol" value={order.expectedContVol} onChange={(n) => onChange({ ...order, expectedContVol: n })} />
+                <IntInput label="Expected Auction Vol" value={order.expectedAuctionVol} onChange={(n) => onChange({ ...order, expectedAuctionVol: n })} />
+              </div>
+              <div className="space-y-3">
+                <h3 className="font-semibold">VWAP & Execution</h3>
+                <MoneyInput label="Market Turnover" value={order.marketTurnover} onNumberChange={(n) => onChange({ ...order, marketTurnover: n })} />
+                <MoneyInput label="OR Manual Market VWAP" value={order.marketVWAPInput} onNumberChange={(n) => onChange({ ...order, marketVWAPInput: n })} />
+                <IntInput label="Your Executed Qty" value={order.orderExecQty} onChange={(n) => onChange({ ...order, orderExecQty: n })} />
+                <MoneyInput label="Your Executed Notional" value={order.orderExecNotional} onNumberChange={(n) => onChange({ ...order, orderExecNotional: n })} />
+                <TradeSimulator order={order} marketVWAP={metrics.marketVWAP} />
+              </div>
+            </div>
+          )}
+
+          <div className="px-4 pb-4">
+            <div className="flex items-center justify-between mt-2">
+                <button onClick={() => setShowDetails(s => !s)} className="text-xs border rounded px-2 py-1 bg-slate-50 hover:bg-slate-100 flex items-center justify-center gap-2">
+                   {showDetails ? 'Hide Execution Plan Details' : 'Show Execution Plan Details'}
+                </button>
+                <button onClick={logSnapshot} className={`px-3 py-1.5 rounded-lg text-xs text-white ${t.strong}`}>Log Snapshot</button>
+            </div>
+            {showDetails && (
+              <div className="overflow-x-auto rounded-xl border mt-2 max-h-60">
+                <table className="w-full text-sm">
+                  <thead className="bg-white sticky top-0">
+                    <tr className="text-left border-b">
+                      <th className="p-2">Interval</th><th className="p-2">Suggested Qty</th><th className="p-2">Exp Mkt Vol</th><th className="p-2">Max Allowed</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {plan.rows.map((r) => (
+                      <tr key={r.interval} className={`border-b last:border-0 ${r.impactRisk ? 'bg-amber-50' : ''} ${metrics.liveRow?.s === r.s ? `${t.bgSoft} animate-pulse` : ""}`}>
+                        <td className={`p-2 ${t.text}`}>{r.impactRisk && '⚠️ '}{r.interval}</td>
+                        <td className="p-2 font-semibold">{formatInt(r.suggestedQty)}</td><td className="p-2">{formatInt(r.expMktVol)}</td>
+                        <td className="p-2">{typeof r.maxAllowed === 'number' ? formatInt(r.maxAllowed) : r.maxAllowed}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+/* -------------------- App Shell -------------------- */
+export default function App() {
+  const [orders, setOrders] = useState<Order[]>([defaultOrder("BUY", 1), defaultOrder("SELL", 1)]);
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [hideCompleted, setHideCompleted] = useState(false);
+  const visibleBase = selectedId ? orders.filter((o) => o.id === selectedId) : orders;
+  const visible = hideCompleted ? visibleBase.filter((o) => !o.completed) : visibleBase;
+  const addOrder = (side: Side) => setOrders((o) => [...o, defaultOrder(side, o.length + 1)]);
+  const removeOrder = (id: string) => {
+    setOrders((o) => o.filter((x) => x.id !== id));
+    if (selectedId === id) setSelectedId(null);
+  };
+  const duplicateOrder = (id: string) =>
+    setOrders((o) => {
+      const src = o.find((x) => x.id === id);
+      if (!src) return o;
+      return [...o, { ...src, id: Math.random().toString(36).slice(2, 9), name: src.name + " (copy)" }];
+    });
+  const updateOrder = (id: string, next: Order) => setOrders((o) => o.map((x) => (x.id === id ? next : x)));
+
+  return (
+    <div className="min-h-screen bg-slate-50 text-slate-900">
+      <div className="sticky top-0 z-20 backdrop-blur bg-slate-50/80 border-b">
+        <div className="max-w-7xl mx-auto p-4">
+          <div className="flex items-center justify-between flex-wrap gap-3">
+            <h1 className="text-xl font-bold">Execution Planner v2.1</h1>
+            <div className="flex items-center gap-2">
+              <label className="text-xs flex items-center gap-2 mr-2">
+                <input type="checkbox" checked={hideCompleted} onChange={(e) => setHideCompleted(e.target.checked)} /> Hide completed
+              </label>
+              <button onClick={() => addOrder("BUY")} className="px-3 py-2 rounded-xl bg-emerald-600 text-white text-sm">+ Add BUY</button>
+              <button onClick={() => addOrder("SELL")} className="px-3 py-2 rounded-xl bg-rose-600 text-white text-sm">+ Add SELL</button>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div className="max-w-5xl mx-auto p-4 flex gap-6">
+        <div className="flex-1 grid gap-5">
+          {orders.map((o) => (
+             (!hideCompleted || !o.completed) && <PlannerCard key={o.id} order={o} alertsOn={true} onChange={(n) => updateOrder(o.id, n)} onRemove={() => removeOrder(o.id)} onDuplicate={() => duplicateOrder(o.id)}/>
+          ))}
+          {orders.filter(o => !hideCompleted || !o.completed).length === 0 && <div className="text-sm text-slate-500 text-center py-10">No orders to show.</div>}
+        </div>
+      </div>
+    </div>
+  );
+}
