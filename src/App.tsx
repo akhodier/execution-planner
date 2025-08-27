@@ -1,7 +1,15 @@
 import React, { useEffect, useRef, useState } from "react";
 
 /** ======================================================================
- * Execution Planner — Per-Order Presets + Metrics/Alerts + HUD + Rail
+ * Execution Planner — Accumulators, Alerts, Snapshots, Order Rail
+ * - Per-order market preset (affects that order only) + “Start from now”
+ * - Accumulated Suggested vs Executed quantities
+ * - Performance HUD (slip bps, completion %, remaining)
+ * - Collapsible “More Details” (cumulative columns + snapshots)
+ * - Improved alerts (VWAP/volume missing, cap binding, coverage risk, closing soon)
+ * - Mark Completed (task list behavior)
+ * - Orders Rail (desktop) + Chips filter
+ * - Fully responsive, BUY/SELL themes
  * ====================================================================== */
 
 type ExecMode = "OTD" | "INLINE";
@@ -160,6 +168,7 @@ type Order = {
   // per-order UI helpers
   market?: MarketKey;
   startFromNow?: boolean;
+  completed?: boolean;
 
   // history
   snapshots: Snapshot[];
@@ -201,6 +210,7 @@ function defaultOrder(side: Side, idx = 1): Order {
 
     market: "Qatar",
     startFromNow: false,
+    completed: false,
 
     snapshots: [],
   };
@@ -213,7 +223,23 @@ function applyCap(capMode: CapMode, maxPart: number, qty: number, sliceVol: numb
   return Math.max(0, Math.min(Math.floor(qty), allowed));
 }
 
-function buildPlan(order: Order) {
+type BuiltPlan = {
+  rows: Array<{
+    interval: string;
+    s: string;
+    e: string;
+    expMktVol: number;
+    maxAllowed: number | "∞";
+    suggestedQty: number;
+    cumSuggested: number; // running sum
+  }>;
+  contPlanned: number;
+  auctionAllowed: number;
+  auctionPlanned: number;
+  accumSuggested: number; // cont + auction
+};
+
+function buildPlan(order: Order): BuiltPlan {
   const slices = timeSlices(order.sessionStart, order.sessionEnd, order.intervalMins);
   const weights = order.curve === "equal" ? equalWeights(slices.length) : uCurveWeights(slices.length);
   const contVolPerSlice = weights.map((w) => Math.floor(w * order.expectedContVol));
@@ -222,18 +248,19 @@ function buildPlan(order: Order) {
   const auctionAllowed =
     order.capMode === "PCT" ? Math.floor((order.expectedAuctionVol * order.maxPart) / 100) : order.expectedAuctionVol;
 
-  // OTD time-sliced
+  // OTD
   if (order.execMode === "OTD") {
     const targetContinuousQty = Math.max(0, order.orderQty - reserveAuctionQty);
     let remaining = targetContinuousQty;
 
+    let cum = 0;
     const rows = slices.map((slice, i) => {
       const sliceVol = Math.max(0, contVolPerSlice[i]);
       let base = Math.floor(weights[i] * targetContinuousQty);
       base = Math.min(base, remaining);
       let suggested = applyCap(order.capMode, order.maxPart, base, sliceVol);
 
-      // Defer completion: hold a bit for last / auction
+      // Defer completion: keep a little for last slice/auction
       const isLast = i === slices.length - 1;
       if (order.deferCompletion && !isLast) {
         const keepBack = Math.ceil(targetContinuousQty * 0.05);
@@ -242,6 +269,7 @@ function buildPlan(order: Order) {
 
       suggested = Math.min(suggested, remaining);
       remaining -= suggested;
+      cum += suggested;
 
       return {
         interval: slice.label,
@@ -250,6 +278,7 @@ function buildPlan(order: Order) {
         expMktVol: sliceVol,
         maxAllowed: order.capMode === "PCT" ? Math.floor((sliceVol * order.maxPart) / 100) : "∞",
         suggestedQty: suggested,
+        cumSuggested: cum,
       };
     });
 
@@ -258,18 +287,25 @@ function buildPlan(order: Order) {
       reserveAuctionQty + Math.max(0, targetContinuousQty - contPlanned),
       auctionAllowed
     );
-
-    return { rows, contPlanned, auctionAllowed, auctionPlanned };
+    return {
+      rows,
+      contPlanned,
+      auctionAllowed,
+      auctionPlanned,
+      accumSuggested: contPlanned + auctionPlanned,
+    };
   }
 
-  // INLINE (POV)
+  // INLINE: planned POV against expected totals
   const expectedTotalVol = order.currentVol + order.expectedContVol + order.expectedAuctionVol;
   const pov = expectedTotalVol > 0 ? Math.min(1, order.orderQty / expectedTotalVol) : 0;
 
+  let cum = 0;
   const rows = slices.map((slice, i) => {
     const sliceVol = Math.max(0, contVolPerSlice[i]);
     const base = Math.floor(sliceVol * pov);
     const suggested = applyCap(order.capMode, order.maxPart, base, sliceVol);
+    cum += suggested;
     return {
       interval: slice.label,
       s: slice.s,
@@ -277,6 +313,7 @@ function buildPlan(order: Order) {
       expMktVol: sliceVol,
       maxAllowed: order.capMode === "PCT" ? Math.floor((sliceVol * order.maxPart) / 100) : "∞",
       suggestedQty: suggested,
+      cumSuggested: cum,
     };
   });
 
@@ -286,13 +323,16 @@ function buildPlan(order: Order) {
       ? Math.floor((order.expectedAuctionVol * pov * order.maxPart) / 100)
       : Math.floor(order.expectedAuctionVol * pov);
 
+  // Do not exceed total; shave auction first or last slices if deferCompletion
   let totalPlanned = contPlanned + auctionPlanned;
   if (totalPlanned > order.orderQty) {
     const excess = totalPlanned - order.orderQty;
     if (order.deferCompletion) {
-      for (let i = rows.length - 1; i >= 0 && excess > 0; i--) {
-        const trim = Math.min(excess, rows[i].suggestedQty);
+      for (let i = rows.length - 1; i >= 0 && totalPlanned > order.orderQty; i--) {
+        const trim = Math.min(totalPlanned - order.orderQty, rows[i].suggestedQty);
         rows[i].suggestedQty -= trim;
+        // adjust cums
+        for (let k = i; k < rows.length; k++) rows[k].cumSuggested -= trim;
         totalPlanned -= trim;
       }
     } else {
@@ -300,7 +340,7 @@ function buildPlan(order: Order) {
     }
   }
 
-  return { rows, contPlanned, auctionAllowed, auctionPlanned };
+  return { rows, contPlanned, auctionAllowed, auctionPlanned, accumSuggested: contPlanned + auctionPlanned };
 }
 
 function performanceBps(side: Side, orderVWAP: number, marketVWAP: number) {
@@ -310,66 +350,70 @@ function performanceBps(side: Side, orderVWAP: number, marketVWAP: number) {
     : ((orderVWAP - marketVWAP) / marketVWAP) * 10000;
 }
 
-/* -------------------- Metrics & Alerts Engine -------------------- */
-type Metrics = {
-  targetPOV: number;
-  actualPOV: number;
-  povDrift: number;
-  capHeat: number;
-  slipBps: number;
-  paceRatio: number; // reserved
-  minutesToAuction: number;
-  completionRiskPct: number;
-  shortfallShares: number;
-  urgency: number; // 0..1
-};
-type Alert = { kind: string; message: string; severity: "info" | "warn" | "danger" };
+/* -------------------- Metrics & Alerts -------------------- */
+function computeMetrics(order: Order, plan: BuiltPlan) {
+  const suggestedAccum = plan.accumSuggested;
+  const executedAccum = order.orderExecQty;
+  const completionPct = order.orderQty > 0 ? (executedAccum / order.orderQty) * 100 : 0;
+  const remaining = Math.max(0, order.orderQty - executedAccum);
 
-function computeMetrics(order: Order, plan: ReturnType<typeof buildPlan>): Metrics {
-  const expTotal = order.startVol + order.currentVol + order.expectedContVol + order.expectedAuctionVol;
-  const targetPOV = expTotal > 0 ? order.orderQty / expTotal : 0;
-  const actualPOV = expTotal > 0 ? order.orderExecQty / expTotal : 0;
-  const povDrift = actualPOV - targetPOV;
-
-  const capHits = plan.rows.filter(r => typeof r.maxAllowed === "number" && r.suggestedQty >= r.maxAllowed).length;
-  const capHeat = plan.rows.length > 0 ? capHits / plan.rows.length : 0;
-
-  const marketVWAP = order.currentVol > 0
-    ? order.marketTurnover > 0
-      ? order.marketTurnover / order.currentVol
-      : order.marketVWAPInput || 0
-    : order.marketVWAPInput || 0;
-  const orderVWAP = order.orderExecQty > 0 ? order.orderExecNotional / order.orderExecQty : 0;
+  const marketVWAP =
+    order.currentVol > 0
+      ? order.marketTurnover > 0
+        ? order.marketTurnover / order.currentVol
+        : order.marketVWAPInput || 0
+      : order.marketVWAPInput || 0;
+  const orderVWAP =
+    order.orderExecQty > 0 ? order.orderExecNotional / order.orderExecQty : 0;
   const slipBps = performanceBps(order.side, orderVWAP, marketVWAP);
 
-  const minutesToAuction = minutesBetween(nowHHMM(), order.auctionStart);
+  const minsToAuction = minutesBetween(nowHHMM(), order.auctionStart);
+  const coverage = plan.accumSuggested / Math.max(1, order.orderQty); // planned vs order
 
-  const plannedTotal = plan.contPlanned + plan.auctionPlanned;
-  const completionRiskPct = plannedTotal < order.orderQty
-    ? 1 - plannedTotal / order.orderQty
-    : 0;
-  const shortfallShares = Math.max(0, order.orderQty - plannedTotal);
+  // live slice
+  const cur = nowHHMM() + ":00";
+  const liveRow = plan.rows.find((r) => cur >= r.s && cur < r.e);
 
-  const urgency =
-    0.35 * Math.max(0, (order.orderQty - order.orderExecQty)) / Math.max(1, order.orderQty) +
-    0.2  * Math.max(0, 1 - Math.max(0, minutesToAuction) / 60) +
-    0.15 * capHeat +
-    0.15 * Math.min(Math.abs(slipBps) / 100, 1) +
-    0.1  * Math.min(Math.abs(povDrift) / 0.05, 1);
-
-  return { targetPOV, actualPOV, povDrift, capHeat, slipBps, paceRatio: 1, minutesToAuction, completionRiskPct, shortfallShares, urgency };
+  return {
+    suggestedAccum,
+    executedAccum,
+    completionPct,
+    remaining,
+    marketVWAP,
+    orderVWAP,
+    slipBps,
+    minsToAuction,
+    coverage,
+    liveRow,
+  };
 }
 
-function buildAlerts(m: Metrics, order: Order): Alert[] {
-  const alerts: Alert[] = [];
-  // basic data presence
-  if (!(order.marketTurnover > 0 || order.marketVWAPInput > 0)) alerts.push({ kind: "VWAP_MISS", message: "Missing market VWAP (turnover or manual)", severity: "info" });
-  if (order.currentVol === 0 && order.startVol === 0) alerts.push({ kind: "VOL_MISS", message: "Missing market volume", severity: "info" });
-  // execution risk
-  if (Math.abs(m.povDrift) > 0.05) alerts.push({ kind: "POV_DRIFT", message: "POV drift >5%", severity: "warn" });
-  if (m.capHeat > 0.4) alerts.push({ kind: "CAP_BIND", message: "Cap binding in many slices", severity: "warn" });
-  if (Math.abs(m.slipBps) >= 25) alerts.push({ kind: "VWAP", message: `VWAP slippage ${m.slipBps.toFixed(0)} bps`, severity: "danger" });
-  if (m.completionRiskPct > 0.2) alerts.push({ kind: "COMP", message: "Risk of under-completion", severity: "danger" });
+function buildAlerts(order: Order, m: ReturnType<typeof computeMetrics>) {
+  if (order.completed) return [] as string[];
+  const alerts: string[] = [];
+
+  const missingVWAP = !(order.marketTurnover > 0 || order.marketVWAPInput > 0);
+  if (missingVWAP) alerts.push("Missing market VWAP (turnover or manual)");
+
+  if (order.currentVol === 0 && order.startVol === 0) alerts.push("Missing market volume (start/current)");
+
+  if (order.orderExecQty > order.orderQty) alerts.push("Executed > Order (check inputs)");
+
+  if (m.liveRow && typeof m.liveRow.maxAllowed === "number" && m.liveRow.suggestedQty >= m.liveRow.maxAllowed) {
+    alerts.push("Cap binding on live slice");
+  }
+
+  if (m.coverage < 0.95) alerts.push("Coverage risk: planned < 95% of order");
+
+  if (m.minsToAuction <= 10 && m.minsToAuction >= -1) {
+    if (order.deferCompletion) alerts.push("Auction soon — keep reserve intact");
+    else alerts.push("Auction soon — this order must complete before close");
+  }
+
+  if (Math.abs(m.slipBps) >= 25 && order.orderExecQty >= order.orderQty * 0.1) {
+    alerts.push(`VWAP slippage ${m.slipBps.toFixed(0)} bps`);
+  }
+
   return alerts;
 }
 
@@ -407,7 +451,7 @@ function IntInput({
           const n = parseIntSafe(e.target.value);
           setDraft(formatInt(n));
           onChange(n);
-        }}
+        })}
       />
     </label>
   );
@@ -458,7 +502,7 @@ function theme(side: Side) {
     : { text: "text-rose-700", bgSoft: "bg-rose-50", border: "border-rose-300", strong: "bg-rose-600" };
 }
 
-/* -------------------- VWAP box -------------------- */
+/* -------------------- VWAP HUD piece -------------------- */
 function VWAPBox({ order }: { order: Order }) {
   const marketVWAP =
     order.currentVol > 0
@@ -470,7 +514,7 @@ function VWAPBox({ order }: { order: Order }) {
   const perf = performanceBps(order.side, orderVWAP, marketVWAP);
   const color = perf > 0 ? "text-green-600" : perf < 0 ? "text-red-600" : "";
   return (
-    <div className="grid md:grid-cols-4 gap-3 text-sm mt-2">
+    <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-sm">
       <HeaderStat title="Market VWAP" value={marketVWAP ? formatMoney(marketVWAP, 4) : "—"} />
       <HeaderStat title="Order VWAP" value={orderVWAP ? formatMoney(orderVWAP, 4) : "—"} />
       <HeaderStat title="Perf (bps)" value={<span className={color}>{Number.isFinite(perf) ? perf.toFixed(1) : "—"}</span>} />
@@ -485,17 +529,19 @@ function PlannerCard({
   onChange,
   onRemove,
   onDuplicate,
+  alertsOn,
 }: {
   order: Order;
   onChange: (o: Order) => void;
   onRemove: () => void;
   onDuplicate: () => void;
+  alertsOn: boolean;
 }) {
   const t = theme(order.side);
   const [clock, setClock] = useState(nowHHMMSS());
   useInterval(() => setClock(nowHHMMSS()), 1000);
 
-  // Apply market preset (per-order only)
+  // Market preset APPLY-TO-THIS-ORDER ONLY
   function applyMarketPreset(m: MarketKey, startFromNow: boolean) {
     const p = MARKET_PRESET[m];
     const sStart = startFromNow ? nowHHMM() : p.start;
@@ -514,57 +560,39 @@ function PlannerCard({
 
   const plan = buildPlan(order);
   const metrics = computeMetrics(order, plan);
-  const alertsList = buildAlerts(metrics, order);
+  const alerts = buildAlerts(order, metrics);
 
-  const totalPlanned = plan.contPlanned + plan.auctionPlanned;
-  const remaining = Math.max(0, order.orderQty - totalPlanned);
-  const progress = order.orderQty > 0 ? Math.min(100, Math.round((totalPlanned / order.orderQty) * 100)) : 0;
+  const [showDetails, setShowDetails] = useState(false);
+  const [showCumCols, setShowCumCols] = useState(true);
 
-  // Live slice + next clip suggestion
-  const liveIndex = plan.rows.findIndex((r) => {
-    const cur = new Date().toTimeString().slice(0, 5) + ":00";
-    return cur >= r.s && cur < r.e;
-  });
-  const liveSlice = liveIndex >= 0 ? plan.rows[liveIndex] : null;
-  let nextClip = 0;
-  if (liveSlice) {
-    const slicesLeft = Math.max(1, plan.rows.length - liveIndex);
-    const plannedBefore = plan.rows.slice(0, liveIndex).reduce((a, r) => a + r.suggestedQty, 0);
-    const remainingPlan = Math.max(0, order.orderQty - (plannedBefore + plan.auctionPlanned));
-    const base = Math.floor(remainingPlan / slicesLeft);
-    nextClip =
-      typeof liveSlice.maxAllowed === "number" ? Math.min(base, liveSlice.maxAllowed) : base;
-    nextClip = Math.max(0, nextClip);
-  }
+  // toast-y nudge for alerts (optional)
+  const [toast, setToast] = useState<string | null>(null);
+  useEffect(() => {
+    if (!alertsOn) return;
+    if (alerts.length) {
+      setToast(alerts[0]);
+      const id = setTimeout(() => setToast(null), 3500);
+      return () => clearTimeout(id);
+    }
+  }, [alertsOn, order.id, alerts]);
 
   // CSV export
   const csv = (() => {
-    const base = plan.rows.map((r) => ({
-      Interval: r.interval,
-      "Expected Market Vol": r.expMktVol,
-      "Max Allowed": r.maxAllowed,
-      "Suggested Qty": r.suggestedQty,
-    }));
-    base.push({
-      Interval: "Auction",
-      "Expected Market Vol": order.expectedAuctionVol,
-      "Max Allowed": plan.auctionAllowed,
-      "Suggested Qty": plan.auctionPlanned,
-    });
-    base.push({
-      Interval: "Totals",
-      "Expected Market Vol":
-        order.startVol + order.currentVol + order.expectedContVol + order.expectedAuctionVol,
-      "Max Allowed": "—",
-      "Suggested Qty": totalPlanned,
-    });
-    const headers = Object.keys(base[0] || {});
+    const headers = ["Interval", "Expected Market Vol", "Max Allowed", "Suggested Qty", "Cum Suggested"];
+    const base = plan.rows.map((r) => [
+      r.interval,
+      r.expMktVol,
+      typeof r.maxAllowed === "number" ? r.maxAllowed : "∞",
+      r.suggestedQty,
+      r.cumSuggested,
+    ]);
+    base.push(["Auction", order.expectedAuctionVol, plan.auctionAllowed, plan.auctionPlanned, plan.accumSuggested]);
     const esc = (v: any) => {
       const s = String(v ?? "");
       return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
     };
     return [headers.join(",")]
-      .concat(base.map((r) => headers.map((h) => esc((r as any)[h])).join(",")))
+      .concat(base.map((r) => r.map(esc).join(",")))
       .join("\n");
   })();
   function downloadCSV() {
@@ -577,7 +605,7 @@ function PlannerCard({
     URL.revokeObjectURL(url);
   }
 
-  // Snapshots
+  // Log snapshot (store current state)
   function logSnapshot() {
     const snap: Snapshot = {
       at: nowHHMMSS(),
@@ -592,20 +620,46 @@ function PlannerCard({
     onChange({ ...order, snapshots: [...order.snapshots, snap] });
   }
 
+  // Colors for status
+  const statusPill = order.completed ? "bg-green-600 text-white" : "bg-slate-900 text-white";
+
   return (
     <div className={`rounded-2xl shadow border ${t.border} bg-white overflow-hidden`}>
       {/* Header */}
       <div className={`px-4 py-3 border-b ${t.border} flex items-center justify-between`}>
         <div className="flex items-center gap-3">
-          <span className={`inline-flex items-center px-2.5 py-1 rounded-full text-xs font-semibold ${t.bgSoft} ${t.text}`}>{order.side}</span>
-          <div className="text-sm opacity-70">Local time (CLT): <span className="font-mono">{clock}</span></div>
+          <span className={`inline-flex items-center px-2.5 py-1 rounded-full text-xs font-semibold ${t.bgSoft} ${t.text}`}>
+            {order.side}
+          </span>
+          <div className="text-sm opacity-70">
+            Local time (CLT): <span className="font-mono">{clock}</span>
+          </div>
         </div>
         <div className="flex gap-2">
-          <button onClick={downloadCSV} className="px-3 py-2 rounded-xl bg-slate-900 text-white text-sm">Export CSV</button>
-          <button onClick={onDuplicate} className="px-3 py-2 rounded-xl border text-sm">Duplicate</button>
-          <button onClick={onRemove} className="px-3 py-2 rounded-xl border text-sm">Remove</button>
+          <button
+            onClick={() => onChange({ ...order, completed: !order.completed })}
+            className={`px-3 py-2 rounded-xl text-sm ${statusPill}`}
+          >
+            {order.completed ? "Completed" : "Mark Completed"}
+          </button>
+          <button onClick={downloadCSV} className="px-3 py-2 rounded-xl bg-slate-900 text-white text-sm">
+            Export CSV
+          </button>
+          <button onClick={onDuplicate} className="px-3 py-2 rounded-xl border text-sm">
+            Duplicate
+          </button>
+          <button onClick={onRemove} className="px-3 py-2 rounded-xl border text-sm">
+            Remove
+          </button>
         </div>
       </div>
+
+      {/* Optional toast */}
+      {toast && (
+        <div className={`m-3 p-3 rounded-xl border text-sm ${t.bgSoft} ${t.text} ${t.border}`}>
+          ⚠️ {toast}
+        </div>
+      )}
 
       {/* Market preset row (per order) */}
       <div className="px-4 py-2 flex flex-wrap items-center gap-2 text-sm">
@@ -630,34 +684,52 @@ function PlannerCard({
         <span className="text-xs opacity-60 ml-2">Applies to this order only.</span>
       </div>
 
-      {/* HUD row (metrics) */}
-      <div className="px-4 py-2 grid grid-cols-3 md:grid-cols-6 gap-2 text-xs">
-        <HeaderStat title="Target POV" value={(metrics.targetPOV*100).toFixed(1)+"%"} />
-        <HeaderStat title="Actual POV" value={(metrics.actualPOV*100).toFixed(1)+"%"} />
-        <HeaderStat title="POV Drift" value={(metrics.povDrift*100).toFixed(1)+"%"} />
-        <HeaderStat title="VWAP Slip" value={`${metrics.slipBps.toFixed(1)} bps`} />
-        <HeaderStat title="Cap Heat" value={(metrics.capHeat*100).toFixed(0)+"%"} />
-        <HeaderStat title="Urgency" value={(metrics.urgency*100).toFixed(0)} />
+      {/* HUD: accumulators + progress + VWAP slip */}
+      <div className="px-4 py-2 grid grid-cols-2 md:grid-cols-6 gap-3 items-end">
+        <HeaderStat title="Name" value={
+          <input
+            className="border rounded-xl px-2 py-1 w-full"
+            value={order.name}
+            onChange={(e) => onChange({ ...order, name: e.target.value })}
+          />
+        }/>
+        <HeaderStat title="Symbol" value={<span className="font-mono">{order.symbol}</span>} />
+        <HeaderStat title="Suggested Accum" value={formatInt(metrics.suggestedAccum)} />
+        <HeaderStat title="Executed Accum" value={formatInt(metrics.executedAccum)} />
+        <HeaderStat title="Completion %" value={`${metrics.completionPct.toFixed(1)}%`} />
+        <HeaderStat title="VWAP Slip" value={`${Number.isFinite(metrics.slipBps) ? metrics.slipBps.toFixed(1) : "—"} bps`} />
+        <div className="col-span-2 md:col-span-6 flex flex-col gap-1">
+          <div className="text-xs opacity-60">Progress</div>
+          <div className="w-full h-2 rounded-full bg-slate-200 overflow-hidden">
+            <div
+              className={`h-2 ${t.strong}`}
+              style={{ width: `${Math.min(100, Math.round((metrics.suggestedAccum / Math.max(1, order.orderQty)) * 100))}%` }}
+            />
+          </div>
+          <div className="text-xs opacity-60">
+            Planned: {formatInt(metrics.suggestedAccum)} / {formatInt(order.orderQty)} · Remaining (vs executed) {formatInt(metrics.remaining)}
+          </div>
+        </div>
       </div>
 
-      {/* Alerts + Next Action */}
-      <div className="px-4 py-2 flex flex-wrap gap-2">
-        {alertsList.length === 0 ? (
+      {/* Alerts line + next action */}
+      <div className="px-4 py-2 flex flex-wrap items-center gap-2">
+        {alerts.length === 0 ? (
           <span className="text-xs px-2.5 py-1 rounded-full bg-slate-100">All checks OK</span>
-        ) : alertsList.map((a, i) => (
-          <span key={i} className={`text-xs px-2.5 py-1 rounded-full ${a.severity==="danger"?"bg-red-100 text-red-700":a.severity==="warn"?"bg-yellow-100 text-yellow-700":"bg-slate-100"}`}>
-            {a.message}
-          </span>
-        ))}
-        {nextClip > 0 && (
+        ) : (
+          alerts.map((a, i) => (
+            <span key={i} className={`text-xs px-2.5 py-1 rounded-full border ${t.border} ${t.bgSoft} ${t.text}`}>{a}</span>
+          ))
+        )}
+        {metrics.liveRow && (
           <span className={`ml-auto text-xs px-2.5 py-1 rounded-full text-white ${t.strong}`}>
-            Next: {formatInt(nextClip)}
+            Next: {formatInt(metrics.liveRow.suggestedQty)} in {metrics.liveRow.interval}
           </span>
         )}
       </div>
 
       {/* Compact inputs + VWAP */}
-      <div className="px-4 pb-4 grid md:grid-cols-3 gap-4">
+      <div className="px-4 pb-4 grid grid-cols-1 md:grid-cols-3 gap-4">
         <div className="space-y-3">
           <h3 className="font-semibold">Order</h3>
           <label className="text-sm">
@@ -828,109 +900,129 @@ function PlannerCard({
         </div>
       </div>
 
-      {/* Macros */}
-      <div className="px-4 py-2 flex gap-2">
-        <button onClick={()=>onChange({...order, maxPart: order.maxPart+2})} className="px-2 py-1 rounded bg-slate-200 text-xs">Raise Cap +2%</button>
-        <button onClick={()=>onChange({...order, reserveAuctionPct: order.reserveAuctionPct+5})} className="px-2 py-1 rounded bg-slate-200 text-xs">Shift +5% Auction</button>
-        <button onClick={logSnapshot} className={`ml-auto px-2.5 py-1.5 rounded-lg text-xs text-white ${t.strong}`}>Log snapshot</button>
-      </div>
-
-      {/* Plan table */}
+      {/* More details (collapsible) */}
       <div className="px-4 pb-4">
-        <div className="overflow-x-auto rounded-xl border mb-3">
-          <table className="w-full text-sm">
-            <thead className="sticky top-0 bg-white">
-              <tr className="text-left border-b">
-                <th className="py-2 pr-2">Interval</th>
-                <th className="py-2 pr-2">Expected Mkt Vol</th>
-                <th className="py-2 pr-2">Max Allowed</th>
-                <th className="py-2 pr-2">Suggested Qty</th>
-              </tr>
-            </thead>
-            <tbody>
-              {plan.rows.map((r) => {
-                const cur = new Date().toTimeString().slice(0, 5) + ":00";
-                const isLive = cur >= r.s && cur < r.e;
-                return (
-                  <tr key={r.interval} className={`border-b last:border-0 ${isLive ? `${t.bgSoft} animate-pulse` : ""}`}>
-                    <td className={`py-2 pr-2 ${t.text}`}>{r.interval}</td>
-                    <td className="py-2 pr-2">{formatInt(r.expMktVol)}</td>
-                    <td className="py-2 pr-2">{typeof r.maxAllowed === "number" ? formatInt(r.maxAllowed) : r.maxAllowed}</td>
-                    <td className="py-2 pr-2 font-semibold">{formatInt(r.suggestedQty)}</td>
-                  </tr>
-                );
-              })}
-              <tr className="bg-slate-50">
-                <td className="py-2 pr-2 font-semibold">
-                  Auction {order.auctionStart}–{order.auctionEnd}
-                </td>
-                <td className="py-2 pr-2">{formatInt(order.expectedAuctionVol)}</td>
-                <td className="py-2 pr-2">{formatInt(plan.auctionAllowed)}</td>
-                <td className="py-2 pr-2 font-semibold">{formatInt(plan.auctionPlanned)}</td>
-              </tr>
-            </tbody>
-            <tfoot>
-              <tr className="border-t">
-                <td className="py-2 pr-2 font-semibold">Totals</td>
-                <td className="py-2 pr-2">
-                  {formatInt(order.startVol + order.currentVol + order.expectedContVol + order.expectedAuctionVol)}
-                </td>
-                <td className="py-2 pr-2">—</td>
-                <td className="py-2 pr-2 font-semibold">
-                  {formatInt(totalPlanned)} (Remain {formatInt(remaining)})
-                </td>
-              </tr>
-            </tfoot>
-          </table>
-        </div>
-
-        {/* Snapshot history (compact) */}
-        <div className="rounded-xl border">
-          <div className="px-3 py-2 text-sm font-medium">Snapshots (latest first)</div>
-          <div className="overflow-x-auto">
-            <table className="w-full text-xs">
-              <thead className="bg-slate-50">
-                <tr className="text-left">
-                  <th className="p-2">Time</th>
-                  <th className="p-2">Cur Vol</th>
-                  <th className="p-2">Exp Cont</th>
-                  <th className="p-2">Exp Auction</th>
-                  <th className="p-2">Exec Qty</th>
-                  <th className="p-2">Exec Notional</th>
-                  <th className="p-2">Turnover</th>
-                  <th className="p-2">Manual VWAP</th>
-                </tr>
-              </thead>
-              <tbody>
-                {[...order.snapshots].reverse().map((s, i) => (
-                  <tr key={i} className="border-t">
-                    <td className="p-2 font-mono">{s.at}</td>
-                    <td className="p-2">{formatInt(s.currentVol)}</td>
-                    <td className="p-2">{formatInt(s.expectedContVol)}</td>
-                    <td className="p-2">{formatInt(s.expectedAuctionVol)}</td>
-                    <td className="p-2">{formatInt(s.orderExecQty)}</td>
-                    <td className="p-2">{formatMoney(s.orderExecNotional, 2)}</td>
-                    <td className="p-2">{formatMoney(s.marketTurnover, 2)}</td>
-                    <td className="p-2">{s.marketVWAPInput ? formatMoney(s.marketVWAPInput, 4) : "—"}</td>
-                  </tr>
-                ))}
-                {order.snapshots.length === 0 && (
-                  <tr>
-                    <td className="p-2 text-slate-500" colSpan={8}>
-                      No snapshots logged yet. Click “Log snapshot” whenever you update the fields to track progress & refine guidance.
-                    </td>
-                  </tr>
-                )}
-              </tbody>
-            </table>
+        <div className="flex items-center justify-between mb-2">
+          <div className="flex items-center gap-2">
+            <button onClick={() => setShowDetails((s) => !s)} className="px-2 py-1 text-xs border rounded">
+              {showDetails ? "Hide details" : "Show details"}
+            </button>
+            {showDetails && (
+              <label className="text-xs flex items-center gap-2 ml-2">
+                <input type="checkbox" checked={showCumCols} onChange={(e) => setShowCumCols(e.target.checked)} />
+                Show cumulative columns
+              </label>
+            )}
+          </div>
+          <div className="flex items-center gap-2">
+            <button onClick={logSnapshot} className={`px-2.5 py-1.5 rounded-lg text-xs text-white ${t.strong}`}>
+              Log snapshot
+            </button>
           </div>
         </div>
+
+        {showDetails && (
+          <>
+            <div className="overflow-x-auto rounded-xl border mb-3">
+              <table className="w-full text-sm">
+                <thead className="sticky top-0 bg-white">
+                  <tr className="text-left border-b">
+                    <th className="py-2 pr-2">Interval</th>
+                    <th className="py-2 pr-2">Expected Mkt Vol</th>
+                    <th className="py-2 pr-2">Max Allowed</th>
+                    <th className="py-2 pr-2">Suggested Qty</th>
+                    {showCumCols && <th className="py-2 pr-2">Cum Suggested</th>}
+                  </tr>
+                </thead>
+                <tbody>
+                  {plan.rows.map((r) => {
+                    const cur = nowHHMM() + ":00";
+                    const isLive = cur >= r.s && cur < r.e;
+                    return (
+                      <tr key={r.interval} className={`border-b last:border-0 ${isLive ? `${t.bgSoft} animate-pulse` : ""}`}>
+                        <td className={`py-2 pr-2 ${t.text}`}>{r.interval}</td>
+                        <td className="py-2 pr-2">{formatInt(r.expMktVol)}</td>
+                        <td className="py-2 pr-2">{typeof r.maxAllowed === "number" ? formatInt(r.maxAllowed) : r.maxAllowed}</td>
+                        <td className="py-2 pr-2 font-semibold">{formatInt(r.suggestedQty)}</td>
+                        {showCumCols && <td className="py-2 pr-2">{formatInt(r.cumSuggested)}</td>}
+                      </tr>
+                    );
+                  })}
+                  <tr className="bg-slate-50">
+                    <td className="py-2 pr-2 font-semibold">
+                      Auction {order.auctionStart}–{order.auctionEnd}
+                    </td>
+                    <td className="py-2 pr-2">{formatInt(order.expectedAuctionVol)}</td>
+                    <td className="py-2 pr-2">{formatInt(plan.auctionAllowed)}</td>
+                    <td className="py-2 pr-2 font-semibold">{formatInt(plan.auctionPlanned)}</td>
+                    {showCumCols && <td className="py-2 pr-2">{formatInt(plan.accumSuggested)}</td>}
+                  </tr>
+                </tbody>
+                <tfoot>
+                  <tr className="border-t">
+                    <td className="py-2 pr-2 font-semibold">Totals</td>
+                    <td className="py-2 pr-2">
+                      {formatInt(order.startVol + order.currentVol + order.expectedContVol + order.expectedAuctionVol)}
+                    </td>
+                    <td className="py-2 pr-2">—</td>
+                    <td className="py-2 pr-2 font-semibold">
+                      {formatInt(plan.contPlanned + plan.auctionPlanned)} (Remain vs order {formatInt(Math.max(0, order.orderQty - (plan.contPlanned + plan.auctionPlanned)))} )
+                    </td>
+                    {showCumCols && <td className="py-2 pr-2">{formatInt(plan.accumSuggested)}</td>}
+                  </tr>
+                </tfoot>
+              </table>
+            </div>
+
+            {/* Snapshot history */}
+            <div className="rounded-xl border">
+              <div className="px-3 py-2 text-sm font-medium">Snapshots (latest first)</div>
+              <div className="overflow-x-auto">
+                <table className="w-full text-xs">
+                  <thead className="bg-slate-50">
+                    <tr className="text-left">
+                      <th className="p-2">Time</th>
+                      <th className="p-2">Cur Vol</th>
+                      <th className="p-2">Exp Cont</th>
+                      <th className="p-2">Exp Auction</th>
+                      <th className="p-2">Exec Qty</th>
+                      <th className="p-2">Exec Notional</th>
+                      <th className="p-2">Turnover</th>
+                      <th className="p-2">Manual VWAP</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {[...order.snapshots].reverse().map((s, i) => (
+                      <tr key={i} className="border-t">
+                        <td className="p-2 font-mono">{s.at}</td>
+                        <td className="p-2">{formatInt(s.currentVol)}</td>
+                        <td className="p-2">{formatInt(s.expectedContVol)}</td>
+                        <td className="p-2">{formatInt(s.expectedAuctionVol)}</td>
+                        <td className="p-2">{formatInt(s.orderExecQty)}</td>
+                        <td className="p-2">{formatMoney(s.orderExecNotional, 2)}</td>
+                        <td className="p-2">{formatMoney(s.marketTurnover, 2)}</td>
+                        <td className="p-2">{s.marketVWAPInput ? formatMoney(s.marketVWAPInput, 4) : "—"}</td>
+                      </tr>
+                    ))}
+                    {order.snapshots.length === 0 && (
+                      <tr>
+                        <td className="p-2 text-slate-500" colSpan={8}>
+                          No snapshots yet. Click “Log snapshot” whenever you update the fields to track progress & refine guidance.
+                        </td>
+                      </tr>
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </>
+        )}
       </div>
     </div>
   );
 }
 
-/* -------------------- Aggregates & App Shell -------------------- */
+/* -------------------- Aggregates, Rail & App Shell -------------------- */
 type Aggregates = {
   qtyTotal: number;
   plannedTotal: number;
@@ -1005,15 +1097,60 @@ function SummaryCard({
   );
 }
 
+function OrdersRail({
+  orders,
+  selectedId,
+  onSelect,
+}: {
+  orders: Order[];
+  selectedId: string | null;
+  onSelect: (id: string | null) => void;
+}) {
+  return (
+    <aside className="hidden lg:block sticky top-20 h-[calc(100vh-6rem)] w-64 shrink-0 overflow-auto pl-2">
+      <div className="text-xs uppercase opacity-60 mb-2">Orders</div>
+      <div className="space-y-2">
+        <button
+          onClick={() => onSelect(null)}
+          className={`w-full text-left px-3 py-2 rounded-xl border ${selectedId === null ? "bg-slate-900 text-white" : "bg-white"}`}
+        >
+          ALL
+        </button>
+        {orders.map((o) => {
+          const th = theme(o.side);
+          const planned = buildPlan(o).accumSuggested;
+          const progress = Math.min(100, Math.round((planned / Math.max(1, o.orderQty)) * 100));
+          return (
+            <button
+              key={o.id}
+              onClick={() => onSelect(o.id)}
+              className={`w-full text-left px-3 py-2 rounded-xl border ${selectedId === o.id ? "bg-slate-900 text-white" : "bg-white"}`}
+            >
+              <div className="flex items-center justify-between">
+                <div className="font-medium text-sm">{o.name}</div>
+                <span className={`text-[10px] px-2 py-0.5 rounded-full ${th.bgSoft} ${th.text}`}>{o.side}</span>
+              </div>
+              <div className="text-xs opacity-70">{o.symbol} · {o.completed ? "Completed" : "Active"}</div>
+              <div className="w-full h-1.5 rounded-full bg-slate-200 mt-2 overflow-hidden">
+                <div className={`${th.strong} h-1.5`} style={{ width: `${progress}%` }} />
+              </div>
+            </button>
+          );
+        })}
+      </div>
+    </aside>
+  );
+}
+
 export default function App() {
   const [orders, setOrders] = useState<Order[]>([defaultOrder("BUY", 1), defaultOrder("SELL", 1)]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
-  const [notificationsEnabled, setNotificationsEnabled] = useState<boolean>(false);
+  const [alertsOn, setAlertsOn] = useState(true);
+  const [hideCompleted, setHideCompleted] = useState(false);
 
-  // Avoid spamming notifications: remember last danger alerts per order
-  const lastDangerRef = useRef<Record<string, string>>({});
+  const visibleBase = selectedId ? orders.filter((o) => o.id === selectedId) : orders;
+  const visible = hideCompleted ? visibleBase.filter((o) => !o.completed) : visibleBase;
 
-  const visible = selectedId ? orders.filter((o) => o.id === selectedId) : orders;
   const chips = [{ id: null as string | null, label: "ALL" }].concat(
     orders.map((o) => ({ id: o.id, label: o.name, side: o.side } as any))
   );
@@ -1031,28 +1168,6 @@ export default function App() {
     });
   const updateOrder = (id: string, next: Order) => setOrders((o) => o.map((x) => (x.id === id ? next : x)));
 
-  // Notifications for danger alerts (opt-in)
-  useEffect(() => {
-    if (!notificationsEnabled) return;
-    if (typeof window === "undefined" || !("Notification" in window)) return;
-    if (Notification.permission !== "granted") return;
-
-    const nextMap: Record<string, string> = {};
-    orders.forEach((o) => {
-      const m = computeMetrics(o, buildPlan(o));
-      const dangers = buildAlerts(m, o).filter((a) => a.severity === "danger");
-      const key = dangers.map((d) => d.kind + ":" + d.message).join("|");
-      nextMap[o.id] = key;
-
-      if (key && key !== lastDangerRef.current[o.id]) {
-        dangers.forEach((d) => {
-          new Notification(`${o.symbol} ${o.side}`, { body: d.message });
-        });
-      }
-    });
-    lastDangerRef.current = nextMap;
-  }, [orders, notificationsEnabled]);
-
   // Dashboard aggregates (respect filter)
   const agAll = aggregateOrders(visible);
   const agBuy = aggregateOrders(visible.filter((o) => o.side === "BUY"));
@@ -1060,105 +1175,88 @@ export default function App() {
 
   return (
     <div className="min-h-screen bg-slate-50 text-slate-900">
-      {/* Orders Rail */}
-      <div className="fixed left-0 top-16 bottom-0 w-40 bg-white border-r overflow-y-auto">
-        {orders.map(o => {
-          const m = computeMetrics(o, buildPlan(o));
-          const urgent = Math.round(m.urgency*100);
-          return (
-            <button key={o.id} onClick={() => setSelectedId(o.id)}
-              className={`block w-full text-left px-3 py-2 border-b ${selectedId===o.id?"bg-slate-200":""}`}>
-              <div className="font-semibold text-xs">{o.symbol}</div>
-              <div className={`text-${o.side==="BUY"?"emerald":"rose"}-600 text-xs`}>{o.side}</div>
-              <div className="text-xs">Urg {urgent}</div>
-            </button>
-          );
-        })}
-      </div>
-
-      <div className="ml-40">
-        {/* Sticky Dashboard */}
-        <div className="sticky top-0 z-20 backdrop-blur bg-slate-50/80 border-b">
-          <div className="max-w-7xl mx-auto p-4 grid gap-4">
-            <div className="flex items-center justify-between">
-              <h1 className="text-xl font-bold">Execution Planner</h1>
-              <div className="flex gap-2">
-                <button onClick={() => addOrder("BUY")} className="px-3 py-2 rounded-xl bg-emerald-600 text-white text-sm">+ Add BUY</button>
-                <button onClick={() => addOrder("SELL")} className="px-3 py-2 rounded-xl bg-rose-600 text-white text-sm">+ Add SELL</button>
-                <button
-                  onClick={() => {
-                    if (typeof window !== "undefined" && "Notification" in window) {
-                      Notification.requestPermission().then(p => {
-                        setNotificationsEnabled(p === "granted");
-                      });
-                    }
-                  }}
-                  className="px-3 py-2 rounded-xl border text-sm"
-                >
-                  {notificationsEnabled ? "Alerts On" : "Enable Alerts"}
-                </button>
-              </div>
-            </div>
-
-            {/* Summary */}
-            <div className="grid md:grid-cols-3 gap-3">
-              <SummaryCard title="ALL Orders" tint="slate" ag={agAll} />
-              <SummaryCard title="BUY" tint="emerald" ag={agBuy} side="BUY" />
-              <SummaryCard title="SELL" tint="rose" ag={agSell} side="SELL" />
-            </div>
-
-            {/* Chips Filter */}
-            <div className="flex flex-wrap gap-2">
-              {chips.map((c: any) => {
-                const active = selectedId === c.id;
-                const isBuy = c.side === "BUY";
-                const isSell = c.side === "SELL";
-                const color = active
-                  ? "bg-slate-900 text-white"
-                  : isBuy
-                  ? "bg-emerald-50 text-emerald-700"
-                  : isSell
-                  ? "bg-rose-50 text-rose-700"
-                  : "bg-white text-slate-700";
-                const border = isBuy ? "border-emerald-200" : isSell ? "border-rose-200" : "border-slate-200";
-                return (
-                  <button
-                    key={String(c.id ?? "ALL")}
-                    onClick={() => setSelectedId(c.id)}
-                    className={`px-3 py-1.5 rounded-full text-xs border ${color} ${border}`}
-                  >
-                    {c.label}
-                  </button>
-                );
-              })}
+      {/* Sticky Dashboard */}
+      <div className="sticky top-0 z-20 backdrop-blur bg-slate-50/80 border-b">
+        <div className="max-w-7xl mx-auto p-4 grid gap-4">
+          <div className="flex items-center justify-between flex-wrap gap-3">
+            <h1 className="text-xl font-bold">Execution Planner</h1>
+            <div className="flex items-center gap-2">
+              <label className="text-xs flex items-center gap-2 mr-2">
+                <input type="checkbox" checked={alertsOn} onChange={(e) => setAlertsOn(e.target.checked)} />
+                Alerts on
+              </label>
+              <label className="text-xs flex items-center gap-2 mr-2">
+                <input type="checkbox" checked={hideCompleted} onChange={(e) => setHideCompleted(e.target.checked)} />
+                Hide completed
+              </label>
+              <button onClick={() => addOrder("BUY")} className="px-3 py-2 rounded-xl bg-emerald-600 text-white text-sm">+ Add BUY</button>
+              <button onClick={() => addOrder("SELL")} className="px-3 py-2 rounded-xl bg-rose-600 text-white text-sm">+ Add SELL</button>
             </div>
           </div>
-        </div>
 
-        {/* Orders */}
-        <div className="max-w-7xl mx-auto p-4 grid gap-5">
+          {/* Summary */}
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+            <SummaryCard title="ALL Orders" tint="slate" ag={agAll} />
+            <SummaryCard title="BUY" tint="emerald" ag={agBuy} side="BUY" />
+            <SummaryCard title="SELL" tint="rose" ag={agSell} side="SELL" />
+          </div>
+
+          {/* Chips Filter (mobile-friendly) */}
+          <div className="flex flex-wrap gap-2">
+            {chips.map((c: any) => {
+              const active = selectedId === c.id;
+              const isBuy = c.side === "BUY";
+              const isSell = c.side === "SELL";
+              const color = active
+                ? "bg-slate-900 text-white"
+                : isBuy
+                ? "bg-emerald-50 text-emerald-700"
+                : isSell
+                ? "bg-rose-50 text-rose-700"
+                : "bg-white text-slate-700";
+              const border = isBuy ? "border-emerald-200" : isSell ? "border-rose-200" : "border-slate-200";
+              return (
+                <button
+                  key={String(c.id ?? "ALL")}
+                  onClick={() => setSelectedId(c.id)}
+                  className={`px-3 py-1.5 rounded-full text-xs border ${color} ${border}`}
+                >
+                  {c.label}
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      </div>
+
+      {/* Main + Orders Rail */}
+      <div className="max-w-7xl mx-auto p-4 flex gap-6">
+        <div className="flex-1 grid gap-5">
           {visible.map((o) => (
             <PlannerCard
               key={o.id}
               order={o}
+              alertsOn={alertsOn}
               onChange={(n) => updateOrder(o.id, n)}
               onRemove={() => removeOrder(o.id)}
               onDuplicate={() => duplicateOrder(o.id)}
             />
           ))}
-          {visible.length === 0 && <div className="text-sm text-slate-500">No orders selected.</div>}
+          {visible.length === 0 && <div className="text-sm text-slate-500">No orders to show.</div>}
         </div>
 
-        {/* Quick sanity tests */}
-        <div className="max-w-7xl mx-auto p-4">
-          <div className="bg-white rounded-2xl shadow p-4 text-sm">
-            <div className="font-semibold">Built-in Self Tests</div>
-            <pre className="text-xs bg-slate-50 p-3 rounded-xl overflow-x-auto">{`console.assert(minutesBetween('09:30','10:00') === 30, 'minutesBetween');
+        <OrdersRail orders={orders} selectedId={selectedId} onSelect={setSelectedId} />
+      </div>
+
+      {/* Quick sanity tests */}
+      <div className="max-w-7xl mx-auto p-4">
+        <div className="bg-white rounded-2xl shadow p-4 text-sm">
+          <div className="font-semibold">Built-in Self Tests</div>
+          <pre className="text-xs bg-slate-50 p-3 rounded-xl overflow-x-auto">{`console.assert(minutesBetween('09:30','10:00') === 30, 'minutesBetween');
 console.assert(addMinutes('09:30', 30) === '10:00', 'addMinutes');
 const ts = timeSlices('09:30','10:30',30); console.assert(ts.length===2 && ts[0].s==='09:30' && ts[1].e==='10:30', 'timeSlices');
 const w1 = equalWeights(4); console.assert(Math.abs(w1.reduce((a,b)=>a+b,0)-1) < 1e-9, 'equal sum');
 const w2 = uCurveWeights(5); console.assert(Math.abs(w2.reduce((a,b)=>a+b,0)-1) < 1e-9, 'u sum');`}</pre>
-          </div>
         </div>
       </div>
     </div>
