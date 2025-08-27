@@ -1,1264 +1,2529 @@
 import React, { useEffect, useRef, useState } from "react";
 
+ 
+
 /** ======================================================================
- * Execution Planner — Accumulators, Alerts, Snapshots, Order Rail
- * - Per-order market preset (affects that order only) + “Start from now”
- * - Accumulated Suggested vs Executed quantities
- * - Performance HUD (slip bps, completion %, remaining)
- * - Collapsible “More Details” (cumulative columns + snapshots)
- * - Improved alerts (VWAP/volume missing, cap binding, coverage risk, closing soon)
- * - Mark Completed (task list behavior)
- * - Orders Rail (desktop) + Chips filter
- * - Fully responsive, BUY/SELL themes
- * ====================================================================== */
+
+* Execution Planner — Accumulators, Alerts, Snapshots, Order Rail
+
+* - Per-order market preset (affects that order only) + “Start from now”
+
+* - Accumulated Suggested vs Executed quantities
+
+* - Performance HUD (slip bps, completion %, remaining)
+
+* - Collapsible “More Details” (cumulative columns + snapshots)
+
+* - Improved alerts (VWAP/volume missing, cap binding, coverage risk, closing soon)
+
+* - Mark Completed (task list behavior)
+
+* - Orders Rail (desktop) + Chips filter
+
+* - Fully responsive, BUY/SELL themes
+
+* ====================================================================== */
+
+ 
 
 type ExecMode = "OTD" | "INLINE";
+
 type CapMode = "NONE" | "PCT";
+
 type Curve = "equal" | "ucurve";
+
 type Side = "BUY" | "SELL";
+
 type MarketKey = "Egypt" | "Kuwait" | "Qatar" | "DFM" | "ADX" | "Saudi";
 
+ 
+
 const MARKET_PRESET: Record<
-  MarketKey,
-  { start: string; auction: string; auctionMatch: string; talStart: string; talEnd: string }
+
+ MarketKey,
+
+ { start: string; auction: string; auctionMatch: string; talStart: string; talEnd: string }
+
 > = {
-  Egypt: { start: "10:00", auction: "14:15", auctionMatch: "14:25", talStart: "14:25", talEnd: "14:30" },
-  Kuwait:{ start: "09:00", auction: "12:30", auctionMatch: "12:40", talStart: "12:40", talEnd: "12:45" },
-  Qatar: { start: "09:30", auction: "13:00", auctionMatch: "13:10", talStart: "13:10", talEnd: "13:15" },
-  DFM:   { start: "09:00", auction: "13:45", auctionMatch: "13:55", talStart: "13:55", talEnd: "14:00" },
-  ADX:   { start: "09:00", auction: "13:45", auctionMatch: "13:55", talStart: "13:55", talEnd: "14:00" },
-  Saudi: { start: "10:00", auction: "15:00", auctionMatch: "15:10", talStart: "15:10", talEnd: "15:20" },
+
+ Egypt: { start: "10:00", auction: "14:15", auctionMatch: "14:25", talStart: "14:25", talEnd: "14:30" },
+
+ Kuwait:{ start: "09:00", auction: "12:30", auctionMatch: "12:40", talStart: "12:40", talEnd: "12:45" },
+
+ Qatar: { start: "09:30", auction: "13:00", auctionMatch: "13:10", talStart: "13:10", talEnd: "13:15" },
+
+ DFM:   { start: "09:00", auction: "13:45", auctionMatch: "13:55", talStart: "13:55", talEnd: "14:00" },
+
+ ADX:   { start: "09:00", auction: "13:45", auctionMatch: "13:55", talStart: "13:55", talEnd: "14:00" },
+
+ Saudi: { start: "10:00", auction: "15:00", auctionMatch: "15:10", talStart: "15:10", talEnd: "15:20" },
+
 };
+
+ 
 
 /* -------------------- Utilities -------------------- */
+
 function minutesBetween(t1: string, t2: string) {
-  const [h1, m1] = t1.split(":").map((x) => parseInt(x || "0", 10));
-  const [h2, m2] = t2.split(":").map((x) => parseInt(x || "0", 10));
-  return h2 * 60 + m2 - (h1 * 60 + m1);
+
+ const [h1, m1] = t1.split(":").map((x) => parseInt(x || "0", 10));
+
+ const [h2, m2] = t2.split(":").map((x) => parseInt(x || "0", 10));
+
+ return h2 * 60 + m2 - (h1 * 60 + m1);
+
 }
+
 function addMinutes(t: string, mins: number) {
-  const [h, m] = t.split(":").map((x) => parseInt(x || "0", 10));
-  const total = h * 60 + m + mins;
-  const hh = Math.floor(total / 60) % 24;
-  const mm = ((total % 60) + 60) % 60;
-  return `${String(hh).padStart(2, "0")}:${String(mm).padStart(2, "0")}`;
+
+ const [h, m] = t.split(":").map((x) => parseInt(x || "0", 10));
+
+ const total = h * 60 + m + mins;
+
+ const hh = Math.floor(total / 60) % 24;
+
+ const mm = ((total % 60) + 60) % 60;
+
+ return `${String(hh).padStart(2, "0")}:${String(mm).padStart(2, "0")}`;
+
 }
+
 function timeSlices(start: string, end: string, step: number) {
-  const out: { s: string; e: string; label: string }[] = [];
-  const total = Math.max(0, minutesBetween(start, end));
-  const n = Math.max(1, Math.ceil(total / step));
-  for (let i = 0; i < n; i++) {
-    const s = addMinutes(start, i * step);
-    const e = i === n - 1 ? end : addMinutes(start, (i + 1) * step);
-    out.push({ s, e, label: `${s} – ${e}` });
-  }
-  return out;
+
+ const out: { s: string; e: string; label: string }[] = [];
+
+ const total = Math.max(0, minutesBetween(start, end));
+
+ const n = Math.max(1, Math.ceil(total / step));
+
+ for (let i = 0; i < n; i++) {
+
+   const s = addMinutes(start, i * step);
+
+   const e = i === n - 1 ? end : addMinutes(start, (i + 1) * step);
+
+   out.push({ s, e, label: `${s} – ${e}` });
+
+ }
+
+ return out;
+
 }
+
 function uCurveWeights(n: number) {
-  if (n <= 0) return [] as number[];
-  const w: number[] = [];
-  const mid = (n - 1) / 2;
-  for (let i = 0; i < n; i++) {
-    const x = Math.abs(i - mid) / (mid || 1);
-    w.push(0.6 + 0.8 * (1 - x));
-  }
-  const sum = w.reduce((a, b) => a + b, 0) || 1;
-  return w.map((x) => x / sum);
+
+ if (n <= 0) return [] as number[];
+
+ const w: number[] = [];
+
+ const mid = (n - 1) / 2;
+
+ for (let i = 0; i < n; i++) {
+
+   const x = Math.abs(i - mid) / (mid || 1);
+
+   w.push(0.6 + 0.8 * (1 - x));
+
+ }
+
+ const sum = w.reduce((a, b) => a + b, 0) || 1;
+
+ return w.map((x) => x / sum);
+
 }
+
 function equalWeights(n: number) {
-  if (n <= 0) return [] as number[];
-  return Array(n).fill(1 / n);
+
+ if (n <= 0) return [] as number[];
+
+ return Array(n).fill(1 / n);
+
 }
+
 function formatInt(n: number | null | undefined) {
-  if (n == null || isNaN(n as any)) return "";
-  return Math.trunc(Number(n)).toLocaleString();
+
+ if (n == null || isNaN(n as any)) return "";
+
+ return Math.trunc(Number(n)).toLocaleString();
+
 }
+
 function parseIntSafe(v: string) {
-  const digits = v.replace(/[^0-9]/g, "");
-  return digits ? parseInt(digits, 10) : 0;
+
+ const digits = v.replace(/[^0-9]/g, "");
+
+ return digits ? parseInt(digits, 10) : 0;
+
 }
+
 function formatMoney(n: number | null | undefined, decimals = 4) {
-  if (n == null || isNaN(n as any)) return "";
-  return Number(n).toLocaleString(undefined, {
-    maximumFractionDigits: decimals,
-    minimumFractionDigits: 0,
-  });
+
+ if (n == null || isNaN(n as any)) return "";
+
+ return Number(n).toLocaleString(undefined, {
+
+  maximumFractionDigits: decimals,
+
+  minimumFractionDigits: 0,
+
+ });
+
 }
+
 function parseMoneySafeAllowTyping(v: string) {
-  const cleaned = v.replace(/[^0-9.]/g, "");
-  const parts = cleaned.split(".");
-  if (parts.length > 2) return parts[0] + "." + parts.slice(1).join("");
-  return cleaned;
+
+ const cleaned = v.replace(/[^0-9.]/g, "");
+
+ const parts = cleaned.split(".");
+
+ if (parts.length > 2) return parts[0] + "." + parts.slice(1).join("");
+
+ return cleaned;
+
 }
+
 function toNumberOrZero(v: string) {
-  const n = parseFloat(v);
-  return isNaN(n) ? 0 : n;
+
+ const n = parseFloat(v);
+
+ return isNaN(n) ? 0 : n;
+
 }
+
 function nowHHMM() {
-  const d = new Date();
-  return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+
+ const d = new Date();
+
+ return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+
 }
+
 function nowHHMMSS() {
-  const d = new Date();
-  return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}:${String(
-    d.getSeconds()
-  ).padStart(2, "0")}`;
+
+ const d = new Date();
+
+ return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}:${String(
+
+   d.getSeconds()
+
+ ).padStart(2, "0")}`;
+
 }
+
 function useInterval(cb: () => void, delay: number | null) {
-  const ref = useRef(cb);
-  useEffect(() => {
-    ref.current = cb;
-  }, [cb]);
-  useEffect(() => {
-    if (delay == null) return;
-    const id = setInterval(() => ref.current(), delay);
-    return () => clearInterval(id);
-  }, [delay]);
+
+ const ref = useRef(cb);
+
+ useEffect(() => {
+
+   ref.current = cb;
+
+ }, [cb]);
+
+ useEffect(() => {
+
+   if (delay == null) return;
+
+   const id = setInterval(() => ref.current(), delay);
+
+   return () => clearInterval(id);
+
+ }, [delay]);
+
 }
+
+ 
 
 /* -------------------- Types & defaults -------------------- */
+
 type Snapshot = {
-  at: string; // HH:MM:SS
-  currentVol: number;
-  expectedContVol: number;
-  expectedAuctionVol: number;
-  orderExecQty: number;
-  orderExecNotional: number;
-  marketTurnover: number;
-  marketVWAPInput: number;
+
+ at: string; // HH:MM:SS
+
+ currentVol: number;
+
+ expectedContVol: number;
+
+ expectedAuctionVol: number;
+
+ orderExecQty: number;
+
+ orderExecNotional: number;
+
+ marketTurnover: number;
+
+ marketVWAPInput: number;
+
 };
+
+ 
 
 type Order = {
-  id: string;
-  name: string;
-  symbol: string;
-  side: Side;
 
-  orderQty: number;
+ id: string;
 
-  execMode: ExecMode;
-  capMode: CapMode;
-  maxPart: number; // %
-  reserveAuctionPct: number; // %
-  deferCompletion: boolean;
+ name: string;
 
-  sessionStart: string;
-  sessionEnd: string;
-  auctionStart: string;
-  auctionEnd: string;
-  talStart: string;
-  talEnd: string;
-  intervalMins: number;
-  curve: Curve;
+ symbol: string;
 
-  // volumes (dealer-updated intraday)
-  startVol: number;
-  currentVol: number;
-  expectedContVol: number;
-  expectedAuctionVol: number;
+ side: Side;
 
-  // VWAP monitor (either turnover OR manual VWAP)
-  marketTurnover: number;
-  marketVWAPInput: number;
+ 
 
-  // executed so far
-  orderExecQty: number;
-  orderExecNotional: number;
+ orderQty: number;
 
-  // per-order UI helpers
-  market?: MarketKey;
-  startFromNow?: boolean;
-  completed?: boolean;
+ 
 
-  // history
-  snapshots: Snapshot[];
+ execMode: ExecMode;
+
+ capMode: CapMode;
+
+ maxPart: number; // %
+
+ reserveAuctionPct: number; // %
+
+ deferCompletion: boolean;
+
+ 
+
+ sessionStart: string;
+
+ sessionEnd: string;
+
+ auctionStart: string;
+
+ auctionEnd: string;
+
+ talStart: string;
+
+ talEnd: string;
+
+ intervalMins: number;
+
+ curve: Curve;
+
+ 
+
+ // volumes (dealer-updated intraday)
+
+ startVol: number;
+
+ currentVol: number;
+
+ expectedContVol: number;
+
+ expectedAuctionVol: number;
+
+ 
+
+ // VWAP monitor (either turnover OR manual VWAP)
+
+ marketTurnover: number;
+
+ marketVWAPInput: number;
+
+ 
+
+ // executed so far
+
+ orderExecQty: number;
+
+ orderExecNotional: number;
+
+ 
+
+ // per-order UI helpers
+
+ market?: MarketKey;
+
+ startFromNow?: boolean;
+
+ completed?: boolean;
+
+ 
+
+ // history
+
+ snapshots: Snapshot[];
+
 };
+
+ 
 
 function defaultOrder(side: Side, idx = 1): Order {
-  return {
-    id: Math.random().toString(36).slice(2, 9),
-    name: side === "BUY" ? `Buy ${idx}` : `Sell ${idx}`,
-    symbol: "QNBK",
-    side,
-    orderQty: 1_600_000,
 
-    execMode: "OTD",
-    capMode: "PCT",
-    maxPart: 15,
-    reserveAuctionPct: 10,
-    deferCompletion: true,
+ return {
 
-    sessionStart: "09:30",
-    sessionEnd: "13:00",
-    auctionStart: "13:00",
-    auctionEnd: "13:10",
-    talStart: "13:10",
-    talEnd: "13:15",
-    intervalMins: 30,
-    curve: "ucurve",
+   id: Math.random().toString(36).slice(2, 9),
 
-    startVol: 0,
-    currentVol: 0,
-    expectedContVol: 800_000,
-    expectedAuctionVol: 400_000,
+   name: side === "BUY" ? `Buy ${idx}` : `Sell ${idx}`,
 
-    marketTurnover: 0,
-    marketVWAPInput: 0,
+   symbol: "QNBK",
 
-    orderExecQty: 0,
-    orderExecNotional: 0,
+   side,
 
-    market: "Qatar",
-    startFromNow: false,
-    completed: false,
+   orderQty: 1_600_000,
 
-    snapshots: [],
-  };
+ 
+
+   execMode: "OTD",
+
+   capMode: "PCT",
+
+   maxPart: 15,
+
+   reserveAuctionPct: 10,
+
+   deferCompletion: true,
+
+ 
+
+   sessionStart: "09:30",
+
+   sessionEnd: "13:00",
+
+   auctionStart: "13:00",
+
+   auctionEnd: "13:10",
+
+   talStart: "13:10",
+
+   talEnd: "13:15",
+
+   intervalMins: 30,
+
+   curve: "ucurve",
+
+ 
+
+   startVol: 0,
+
+   currentVol: 0,
+
+   expectedContVol: 800_000,
+
+  expectedAuctionVol: 400_000,
+
+ 
+
+   marketTurnover: 0,
+
+   marketVWAPInput: 0,
+
+ 
+
+   orderExecQty: 0,
+
+   orderExecNotional: 0,
+
+ 
+
+   market: "Qatar",
+
+   startFromNow: false,
+
+   completed: false,
+
+ 
+
+   snapshots: [],
+
+ };
+
 }
+
+ 
 
 /* -------------------- Planning & analytics -------------------- */
+
 function applyCap(capMode: CapMode, maxPart: number, qty: number, sliceVol: number) {
-  if (capMode === "NONE") return Math.max(0, Math.floor(qty));
-  const allowed = Math.floor((sliceVol * maxPart) / 100);
-  return Math.max(0, Math.min(Math.floor(qty), allowed));
+
+ if (capMode === "NONE") return Math.max(0, Math.floor(qty));
+
+ const allowed = Math.floor((sliceVol * maxPart) / 100);
+
+ return Math.max(0, Math.min(Math.floor(qty), allowed));
+
 }
+
+ 
 
 type BuiltPlan = {
-  rows: Array<{
-    interval: string;
-    s: string;
-    e: string;
-    expMktVol: number;
-    maxAllowed: number | "∞";
-    suggestedQty: number;
-    cumSuggested: number; // running sum
-  }>;
-  contPlanned: number;
-  auctionAllowed: number;
-  auctionPlanned: number;
-  accumSuggested: number; // cont + auction
+
+ rows: Array<{
+
+   interval: string;
+
+   s: string;
+
+   e: string;
+
+   expMktVol: number;
+
+   maxAllowed: number | "∞";
+
+   suggestedQty: number;
+
+   cumSuggested: number; // running sum
+
+ }>;
+
+ contPlanned: number;
+
+ auctionAllowed: number;
+
+ auctionPlanned: number;
+
+ accumSuggested: number; // cont + auction
+
 };
+
+ 
 
 function buildPlan(order: Order): BuiltPlan {
-  const slices = timeSlices(order.sessionStart, order.sessionEnd, order.intervalMins);
-  const weights = order.curve === "equal" ? equalWeights(slices.length) : uCurveWeights(slices.length);
-  const contVolPerSlice = weights.map((w) => Math.floor(w * order.expectedContVol));
-  const reserveAuctionQty = Math.floor((order.orderQty * order.reserveAuctionPct) / 100);
 
-  const auctionAllowed =
-    order.capMode === "PCT" ? Math.floor((order.expectedAuctionVol * order.maxPart) / 100) : order.expectedAuctionVol;
+ const slices = timeSlices(order.sessionStart, order.sessionEnd, order.intervalMins);
 
-  // OTD
-  if (order.execMode === "OTD") {
-    const targetContinuousQty = Math.max(0, order.orderQty - reserveAuctionQty);
-    let remaining = targetContinuousQty;
+ const weights = order.curve === "equal" ? equalWeights(slices.length) : uCurveWeights(slices.length);
 
-    let cum = 0;
-    const rows = slices.map((slice, i) => {
-      const sliceVol = Math.max(0, contVolPerSlice[i]);
-      let base = Math.floor(weights[i] * targetContinuousQty);
-      base = Math.min(base, remaining);
-      let suggested = applyCap(order.capMode, order.maxPart, base, sliceVol);
+ const contVolPerSlice = weights.map((w) => Math.floor(w * order.expectedContVol));
 
-      // Defer completion: keep a little for last slice/auction
-      const isLast = i === slices.length - 1;
-      if (order.deferCompletion && !isLast) {
-        const keepBack = Math.ceil(targetContinuousQty * 0.05);
-        if (remaining - suggested <= 0) suggested = Math.max(0, remaining - keepBack);
-      }
+ const reserveAuctionQty = Math.floor((order.orderQty * order.reserveAuctionPct) / 100);
 
-      suggested = Math.min(suggested, remaining);
-      remaining -= suggested;
-      cum += suggested;
+ 
 
-      return {
-        interval: slice.label,
-        s: slice.s,
-        e: slice.e,
-        expMktVol: sliceVol,
-        maxAllowed: order.capMode === "PCT" ? Math.floor((sliceVol * order.maxPart) / 100) : "∞",
-        suggestedQty: suggested,
-        cumSuggested: cum,
-      };
-    });
+ const auctionAllowed =
 
-    const contPlanned = rows.reduce((a, r) => a + r.suggestedQty, 0);
-    const auctionPlanned = Math.min(
-      reserveAuctionQty + Math.max(0, targetContinuousQty - contPlanned),
-      auctionAllowed
-    );
-    return {
-      rows,
-      contPlanned,
-      auctionAllowed,
-      auctionPlanned,
-      accumSuggested: contPlanned + auctionPlanned,
-    };
-  }
+   order.capMode === "PCT" ? Math.floor((order.expectedAuctionVol * order.maxPart) / 100) : order.expectedAuctionVol;
 
-  // INLINE: planned POV against expected totals
-  const expectedTotalVol = order.currentVol + order.expectedContVol + order.expectedAuctionVol;
-  const pov = expectedTotalVol > 0 ? Math.min(1, order.orderQty / expectedTotalVol) : 0;
+ 
 
-  let cum = 0;
-  const rows = slices.map((slice, i) => {
-    const sliceVol = Math.max(0, contVolPerSlice[i]);
-    const base = Math.floor(sliceVol * pov);
-    const suggested = applyCap(order.capMode, order.maxPart, base, sliceVol);
-    cum += suggested;
-    return {
-      interval: slice.label,
-      s: slice.s,
-      e: slice.e,
-      expMktVol: sliceVol,
-      maxAllowed: order.capMode === "PCT" ? Math.floor((sliceVol * order.maxPart) / 100) : "∞",
-      suggestedQty: suggested,
-      cumSuggested: cum,
-    };
-  });
+ // OTD
 
-  const contPlanned = rows.reduce((a, r) => a + r.suggestedQty, 0);
-  let auctionPlanned =
-    order.capMode === "PCT"
-      ? Math.floor((order.expectedAuctionVol * pov * order.maxPart) / 100)
-      : Math.floor(order.expectedAuctionVol * pov);
+ if (order.execMode === "OTD") {
 
-  // Do not exceed total; shave auction first or last slices if deferCompletion
-  let totalPlanned = contPlanned + auctionPlanned;
-  if (totalPlanned > order.orderQty) {
-    const excess = totalPlanned - order.orderQty;
-    if (order.deferCompletion) {
-      for (let i = rows.length - 1; i >= 0 && totalPlanned > order.orderQty; i--) {
-        const trim = Math.min(totalPlanned - order.orderQty, rows[i].suggestedQty);
-        rows[i].suggestedQty -= trim;
-        // adjust cums
-        for (let k = i; k < rows.length; k++) rows[k].cumSuggested -= trim;
-        totalPlanned -= trim;
-      }
-    } else {
-      auctionPlanned = Math.max(0, auctionPlanned - excess);
-    }
-  }
+   const targetContinuousQty = Math.max(0, order.orderQty - reserveAuctionQty);
 
-  return { rows, contPlanned, auctionAllowed, auctionPlanned, accumSuggested: contPlanned + auctionPlanned };
+   let remaining = targetContinuousQty;
+
+ 
+
+   let cum = 0;
+
+   const rows = slices.map((slice, i) => {
+
+     const sliceVol = Math.max(0, contVolPerSlice[i]);
+
+     let base = Math.floor(weights[i] * targetContinuousQty);
+
+     base = Math.min(base, remaining);
+
+     let suggested = applyCap(order.capMode, order.maxPart, base, sliceVol);
+
+ 
+
+     // Defer completion: keep a little for last slice/auction
+
+     const isLast = i === slices.length - 1;
+
+     if (order.deferCompletion && !isLast) {
+
+       const keepBack = Math.ceil(targetContinuousQty * 0.05);
+
+       if (remaining - suggested <= 0) suggested = Math.max(0, remaining - keepBack);
+
+     }
+
+ 
+
+     suggested = Math.min(suggested, remaining);
+
+     remaining -= suggested;
+
+     cum += suggested;
+
+ 
+
+     return {
+
+       interval: slice.label,
+
+       s: slice.s,
+
+       e: slice.e,
+
+       expMktVol: sliceVol,
+
+       maxAllowed: order.capMode === "PCT" ? Math.floor((sliceVol * order.maxPart) / 100) : "∞",
+
+       suggestedQty: suggested,
+
+       cumSuggested: cum,
+
+     };
+
+   });
+
+ 
+
+   const contPlanned = rows.reduce((a, r) => a + r.suggestedQty, 0);
+
+   const auctionPlanned = Math.min(
+
+    reserveAuctionQty + Math.max(0, targetContinuousQty - contPlanned),
+
+     auctionAllowed
+
+   );
+
+   return {
+
+     rows,
+
+     contPlanned,
+
+     auctionAllowed,
+
+     auctionPlanned,
+
+     accumSuggested: contPlanned + auctionPlanned,
+
+   };
+
+ }
+
+ 
+
+ // INLINE: planned POV against expected totals
+
+ const expectedTotalVol = order.currentVol + order.expectedContVol + order.expectedAuctionVol;
+
+ const pov = expectedTotalVol > 0 ? Math.min(1, order.orderQty / expectedTotalVol) : 0;
+
+ 
+
+ let cum = 0;
+
+ const rows = slices.map((slice, i) => {
+
+   const sliceVol = Math.max(0, contVolPerSlice[i]);
+
+   const base = Math.floor(sliceVol * pov);
+
+   const suggested = applyCap(order.capMode, order.maxPart, base, sliceVol);
+
+   cum += suggested;
+
+   return {
+
+     interval: slice.label,
+
+     s: slice.s,
+
+     e: slice.e,
+
+     expMktVol: sliceVol,
+
+     maxAllowed: order.capMode === "PCT" ? Math.floor((sliceVol * order.maxPart) / 100) : "∞",
+
+     suggestedQty: suggested,
+
+     cumSuggested: cum,
+
+   };
+
+ });
+
+ 
+
+ const contPlanned = rows.reduce((a, r) => a + r.suggestedQty, 0);
+
+ let auctionPlanned =
+
+   order.capMode === "PCT"
+
+     ? Math.floor((order.expectedAuctionVol * pov * order.maxPart) / 100)
+
+     : Math.floor(order.expectedAuctionVol * pov);
+
+ 
+
+ // Do not exceed total; shave auction first or last slices if deferCompletion
+
+ let totalPlanned = contPlanned + auctionPlanned;
+
+ if (totalPlanned > order.orderQty) {
+
+   const excess = totalPlanned - order.orderQty;
+
+   if (order.deferCompletion) {
+
+     for (let i = rows.length - 1; i >= 0 && totalPlanned > order.orderQty; i--) {
+
+       const trim = Math.min(totalPlanned - order.orderQty, rows[i].suggestedQty);
+
+      rows[i].suggestedQty -= trim;
+
+       // adjust cums
+
+       for (let k = i; k < rows.length; k++) rows[k].cumSuggested -= trim;
+
+       totalPlanned -= trim;
+
+     }
+
+   } else {
+
+     auctionPlanned = Math.max(0, auctionPlanned - excess);
+
+   }
+
+ }
+
+ 
+
+ return { rows, contPlanned, auctionAllowed, auctionPlanned, accumSuggested: contPlanned + auctionPlanned };
+
 }
+
+ 
 
 function performanceBps(side: Side, orderVWAP: number, marketVWAP: number) {
-  if (!marketVWAP || !orderVWAP) return 0;
-  return side === "BUY"
-    ? ((marketVWAP - orderVWAP) / marketVWAP) * 10000
-    : ((orderVWAP - marketVWAP) / marketVWAP) * 10000;
+
+ if (!marketVWAP || !orderVWAP) return 0;
+
+ return side === "BUY"
+
+   ? ((marketVWAP - orderVWAP) / marketVWAP) * 10000
+
+   : ((orderVWAP - marketVWAP) / marketVWAP) * 10000;
+
 }
+
+ 
 
 /* -------------------- Metrics & Alerts -------------------- */
+
 function computeMetrics(order: Order, plan: BuiltPlan) {
-  const suggestedAccum = plan.accumSuggested;
-  const executedAccum = order.orderExecQty;
-  const completionPct = order.orderQty > 0 ? (executedAccum / order.orderQty) * 100 : 0;
-  const remaining = Math.max(0, order.orderQty - executedAccum);
 
-  const marketVWAP =
-    order.currentVol > 0
-      ? order.marketTurnover > 0
-        ? order.marketTurnover / order.currentVol
-        : order.marketVWAPInput || 0
-      : order.marketVWAPInput || 0;
-  const orderVWAP =
-    order.orderExecQty > 0 ? order.orderExecNotional / order.orderExecQty : 0;
-  const slipBps = performanceBps(order.side, orderVWAP, marketVWAP);
+ const suggestedAccum = plan.accumSuggested;
 
-  const minsToAuction = minutesBetween(nowHHMM(), order.auctionStart);
-  const coverage = plan.accumSuggested / Math.max(1, order.orderQty); // planned vs order
+ const executedAccum = order.orderExecQty;
 
-  // live slice
-  const cur = nowHHMM() + ":00";
-  const liveRow = plan.rows.find((r) => cur >= r.s && cur < r.e);
+ const completionPct = order.orderQty > 0 ? (executedAccum / order.orderQty) * 100 : 0;
 
-  return {
-    suggestedAccum,
-    executedAccum,
-    completionPct,
-    remaining,
-    marketVWAP,
-    orderVWAP,
-    slipBps,
-    minsToAuction,
-    coverage,
-    liveRow,
-  };
+ const remaining = Math.max(0, order.orderQty - executedAccum);
+
+ 
+
+ const marketVWAP =
+
+   order.currentVol > 0
+
+     ? order.marketTurnover > 0
+
+       ? order.marketTurnover / order.currentVol
+
+       : order.marketVWAPInput || 0
+
+     : order.marketVWAPInput || 0;
+
+ const orderVWAP =
+
+   order.orderExecQty > 0 ? order.orderExecNotional / order.orderExecQty : 0;
+
+ const slipBps = performanceBps(order.side, orderVWAP, marketVWAP);
+
+ 
+
+ const minsToAuction = minutesBetween(nowHHMM(), order.auctionStart);
+
+ const coverage = plan.accumSuggested / Math.max(1, order.orderQty); // planned vs order
+
+ 
+
+ // live slice
+
+ const cur = nowHHMM() + ":00";
+
+ const liveRow = plan.rows.find((r) => cur >= r.s && cur < r.e);
+
+ 
+
+ return {
+
+   suggestedAccum,
+
+   executedAccum,
+
+   completionPct,
+
+   remaining,
+
+   marketVWAP,
+
+   orderVWAP,
+
+   slipBps,
+
+   minsToAuction,
+
+   coverage,
+
+   liveRow,
+
+ };
+
 }
+
+ 
 
 function buildAlerts(order: Order, m: ReturnType<typeof computeMetrics>) {
-  if (order.completed) return [] as string[];
-  const alerts: string[] = [];
 
-  const missingVWAP = !(order.marketTurnover > 0 || order.marketVWAPInput > 0);
-  if (missingVWAP) alerts.push("Missing market VWAP (turnover or manual)");
+ if (order.completed) return [] as string[];
 
-  if (order.currentVol === 0 && order.startVol === 0) alerts.push("Missing market volume (start/current)");
+ const alerts: string[] = [];
 
-  if (order.orderExecQty > order.orderQty) alerts.push("Executed > Order (check inputs)");
+ 
 
-  if (m.liveRow && typeof m.liveRow.maxAllowed === "number" && m.liveRow.suggestedQty >= m.liveRow.maxAllowed) {
-    alerts.push("Cap binding on live slice");
-  }
+ const missingVWAP = !(order.marketTurnover > 0 || order.marketVWAPInput > 0);
 
-  if (m.coverage < 0.95) alerts.push("Coverage risk: planned < 95% of order");
+ if (missingVWAP) alerts.push("Missing market VWAP (turnover or manual)");
 
-  if (m.minsToAuction <= 10 && m.minsToAuction >= -1) {
-    if (order.deferCompletion) alerts.push("Auction soon — keep reserve intact");
-    else alerts.push("Auction soon — this order must complete before close");
-  }
+ 
 
-  if (Math.abs(m.slipBps) >= 25 && order.orderExecQty >= order.orderQty * 0.1) {
-    alerts.push(`VWAP slippage ${m.slipBps.toFixed(0)} bps`);
-  }
+ if (order.currentVol === 0 && order.startVol === 0) alerts.push("Missing market volume (start/current)");
 
-  return alerts;
+ 
+
+ if (order.orderExecQty > order.orderQty) alerts.push("Executed > Order (check inputs)");
+
+ 
+
+ if (m.liveRow && typeof m.liveRow.maxAllowed === "number" && m.liveRow.suggestedQty >= m.liveRow.maxAllowed) {
+
+  alerts.push("Cap binding on live slice");
+
+ }
+
+ 
+
+ if (m.coverage < 0.95) alerts.push("Coverage risk: planned < 95% of order");
+
+ 
+
+ if (m.minsToAuction <= 10 && m.minsToAuction >= -1) {
+
+   if (order.deferCompletion) alerts.push("Auction soon — keep reserve intact");
+
+   else alerts.push("Auction soon — this order must complete before close");
+
+ }
+
+ 
+
+ if (Math.abs(m.slipBps) >= 25 && order.orderExecQty >= order.orderQty * 0.1) {
+
+   alerts.push(`VWAP slippage ${m.slipBps.toFixed(0)} bps`);
+
+ }
+
+ 
+
+ return alerts;
+
 }
+
+ 
 
 /* -------------------- Small UI atoms -------------------- */
+
 function HeaderStat({ title, value }: { title: string; value: React.ReactNode }) {
-  return (
-    <div className="p-3 rounded-xl bg-slate-100">
-      <div className="opacity-60 text-xs">{title}</div>
-      <div className="font-semibold">{value}</div>
-    </div>
-  );
+
+ return (
+
+   <div className="p-3 rounded-xl bg-slate-100">
+
+     <div className="opacity-60 text-xs">{title}</div>
+
+     <div className="font-semibold">{value}</div>
+
+   </div>
+
+ );
+
 }
+
 function IntInput({
-  label,
-  value,
-  onChange,
-  className,
+
+ label,
+
+ value,
+
+ onChange,
+
+ className,
+
 }: {
-  label?: string;
-  value: number;
-  onChange: (n: number) => void;
-  className?: string;
+
+ label?: string;
+
+ value: number;
+
+ onChange: (n: number) => void;
+
+ className?: string;
+
 }) {
-  const [draft, setDraft] = useState(formatInt(value));
-  useEffect(() => setDraft(formatInt(value)), [value]);
-  return (
-    <label className={`text-sm ${className || ""}`}>
-      {label}
-      <input
-        inputMode="numeric"
-        pattern="[0-9]*"
-        className="mt-1 w-full border rounded-xl p-2"
-        value={draft}
-        onChange={(e) => {
-          const n = parseIntSafe(e.target.value);
-          setDraft(formatInt(n));
-          onChange(n);
-        })}
-      />
-    </label>
-  );
+
+ const [draft, setDraft] = useState(formatInt(value));
+
+ useEffect(() => setDraft(formatInt(value)), [value]);
+
+ return (
+
+   <label className={`text-sm ${className || ""}`}>
+
+     {label}
+
+     <input
+
+      inputMode="numeric"
+
+      pattern="[0-9]*"
+
+      className="mt-1 w-full border rounded-xl p-2"
+
+       value={draft}
+
+       onChange={(e) => {
+
+         const n = parseIntSafe(e.target.value);
+
+        setDraft(formatInt(n));
+
+         onChange(n);
+
+       }}
+
+     />
+
+   </label>
+
+ );
+
 }
+
 function MoneyInput({
-  label,
-  value,
-  onNumberChange,
-  className,
-  decimals = 4,
+
+ label,
+
+ value,
+
+ onNumberChange,
+
+ className,
+
+ decimals = 4,
+
 }: {
-  label?: string;
-  value: number;
-  onNumberChange: (n: number) => void;
-  className?: string;
-  decimals?: number;
+
+ label?: string;
+
+ value: number;
+
+ onNumberChange: (n: number) => void;
+
+ className?: string;
+
+ decimals?: number;
+
 }) {
-  const [draft, setDraft] = useState(value === 0 ? "" : String(value));
-  useEffect(() => setDraft(value === 0 ? "" : String(value)), [value]);
-  return (
-    <label className={`text-sm ${className || ""}`}>
-      {label}
-      <input
-        inputMode="decimal"
-        className="mt-1 w-full border rounded-xl p-2"
-        value={draft}
-        onChange={(e) => {
-          const next = parseMoneySafeAllowTyping(e.target.value);
-          setDraft(next);
-          onNumberChange(toNumberOrZero(next));
-        }}
-        onBlur={() => {
-          const n = toNumberOrZero(draft);
-          setDraft(n ? formatMoney(n, decimals) : "");
-          onNumberChange(n);
-        }}
-        onFocus={() => {
-          const n = toNumberOrZero(draft);
-          if (n) setDraft(String(n));
-        }}
-      />
-    </label>
-  );
+
+ const [draft, setDraft] = useState(value === 0 ? "" : String(value));
+
+ useEffect(() => setDraft(value === 0 ? "" : String(value)), [value]);
+
+ return (
+
+   <label className={`text-sm ${className || ""}`}>
+
+     {label}
+
+     <input
+
+      inputMode="decimal"
+
+      className="mt-1 w-full border rounded-xl p-2"
+
+       value={draft}
+
+       onChange={(e) => {
+
+         const next = parseMoneySafeAllowTyping(e.target.value);
+
+        setDraft(next);
+
+        onNumberChange(toNumberOrZero(next));
+
+       }}
+
+       onBlur={() => {
+
+         const n = toNumberOrZero(draft);
+
+         setDraft(n ? formatMoney(n, decimals) : "");
+
+        onNumberChange(n);
+
+       }}
+
+       onFocus={() => {
+
+         const n = toNumberOrZero(draft);
+
+         if (n) setDraft(String(n));
+
+       }}
+
+     />
+
+   </label>
+
+ );
+
 }
+
 function theme(side: Side) {
-  return side === "BUY"
-    ? { text: "text-emerald-700", bgSoft: "bg-emerald-50", border: "border-emerald-300", strong: "bg-emerald-600" }
-    : { text: "text-rose-700", bgSoft: "bg-rose-50", border: "border-rose-300", strong: "bg-rose-600" };
+
+ return side === "BUY"
+
+   ? { text: "text-emerald-700", bgSoft: "bg-emerald-50", border: "border-emerald-300", strong: "bg-emerald-600" }
+
+   : { text: "text-rose-700", bgSoft: "bg-rose-50", border: "border-rose-300", strong: "bg-rose-600" };
+
 }
+
+ 
 
 /* -------------------- VWAP HUD piece -------------------- */
+
 function VWAPBox({ order }: { order: Order }) {
-  const marketVWAP =
-    order.currentVol > 0
-      ? order.marketTurnover > 0
-        ? order.marketTurnover / order.currentVol
-        : order.marketVWAPInput || 0
-      : order.marketVWAPInput || 0;
-  const orderVWAP = order.orderExecQty > 0 ? order.orderExecNotional / order.orderExecQty : 0;
-  const perf = performanceBps(order.side, orderVWAP, marketVWAP);
-  const color = perf > 0 ? "text-green-600" : perf < 0 ? "text-red-600" : "";
-  return (
-    <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-sm">
-      <HeaderStat title="Market VWAP" value={marketVWAP ? formatMoney(marketVWAP, 4) : "—"} />
-      <HeaderStat title="Order VWAP" value={orderVWAP ? formatMoney(orderVWAP, 4) : "—"} />
-      <HeaderStat title="Perf (bps)" value={<span className={color}>{Number.isFinite(perf) ? perf.toFixed(1) : "—"}</span>} />
-      <HeaderStat title="Exec Qty" value={formatInt(order.orderExecQty)} />
-    </div>
-  );
+
+ const marketVWAP =
+
+   order.currentVol > 0
+
+     ? order.marketTurnover > 0
+
+       ? order.marketTurnover / order.currentVol
+
+       : order.marketVWAPInput || 0
+
+     : order.marketVWAPInput || 0;
+
+ const orderVWAP = order.orderExecQty > 0 ? order.orderExecNotional / order.orderExecQty : 0;
+
+ const perf = performanceBps(order.side, orderVWAP, marketVWAP);
+
+ const color = perf > 0 ? "text-green-600" : perf < 0 ? "text-red-600" : "";
+
+ return (
+
+   <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-sm">
+
+     <HeaderStat title="Market VWAP" value={marketVWAP ? formatMoney(marketVWAP, 4) : "—"} />
+
+     <HeaderStat title="Order VWAP" value={orderVWAP ? formatMoney(orderVWAP, 4) : "—"} />
+
+     <HeaderStat title="Perf (bps)" value={<span className={color}>{Number.isFinite(perf) ? perf.toFixed(1) : "—"}</span>} />
+
+     <HeaderStat title="Exec Qty" value={formatInt(order.orderExecQty)} />
+
+   </div>
+
+ );
+
 }
+
+ 
 
 /* -------------------- Per-order Card -------------------- */
+
 function PlannerCard({
-  order,
-  onChange,
-  onRemove,
-  onDuplicate,
-  alertsOn,
+
+ order,
+
+ onChange,
+
+ onRemove,
+
+ onDuplicate,
+
+ alertsOn,
+
 }: {
-  order: Order;
-  onChange: (o: Order) => void;
-  onRemove: () => void;
-  onDuplicate: () => void;
-  alertsOn: boolean;
+
+ order: Order;
+
+ onChange: (o: Order) => void;
+
+ onRemove: () => void;
+
+ onDuplicate: () => void;
+
+ alertsOn: boolean;
+
 }) {
-  const t = theme(order.side);
-  const [clock, setClock] = useState(nowHHMMSS());
-  useInterval(() => setClock(nowHHMMSS()), 1000);
 
-  // Market preset APPLY-TO-THIS-ORDER ONLY
-  function applyMarketPreset(m: MarketKey, startFromNow: boolean) {
-    const p = MARKET_PRESET[m];
-    const sStart = startFromNow ? nowHHMM() : p.start;
-    onChange({
-      ...order,
-      market: m,
-      startFromNow,
-      sessionStart: sStart,
-      sessionEnd: p.auction,
-      auctionStart: p.auction,
-      auctionEnd: p.auctionMatch,
-      talStart: p.talStart,
-      talEnd: p.talEnd,
-    });
-  }
+ const t = theme(order.side);
 
-  const plan = buildPlan(order);
-  const metrics = computeMetrics(order, plan);
-  const alerts = buildAlerts(order, metrics);
+ const [clock, setClock] = useState(nowHHMMSS());
 
-  const [showDetails, setShowDetails] = useState(false);
-  const [showCumCols, setShowCumCols] = useState(true);
+ useInterval(() => setClock(nowHHMMSS()), 1000);
 
-  // toast-y nudge for alerts (optional)
-  const [toast, setToast] = useState<string | null>(null);
-  useEffect(() => {
-    if (!alertsOn) return;
-    if (alerts.length) {
-      setToast(alerts[0]);
-      const id = setTimeout(() => setToast(null), 3500);
-      return () => clearTimeout(id);
-    }
-  }, [alertsOn, order.id, alerts]);
+ 
 
-  // CSV export
-  const csv = (() => {
-    const headers = ["Interval", "Expected Market Vol", "Max Allowed", "Suggested Qty", "Cum Suggested"];
-    const base = plan.rows.map((r) => [
-      r.interval,
-      r.expMktVol,
-      typeof r.maxAllowed === "number" ? r.maxAllowed : "∞",
-      r.suggestedQty,
-      r.cumSuggested,
-    ]);
-    base.push(["Auction", order.expectedAuctionVol, plan.auctionAllowed, plan.auctionPlanned, plan.accumSuggested]);
-    const esc = (v: any) => {
-      const s = String(v ?? "");
-      return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
-    };
-    return [headers.join(",")]
-      .concat(base.map((r) => r.map(esc).join(",")))
-      .join("\n");
-  })();
-  function downloadCSV() {
-    const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = `${order.symbol}_${order.side}_${order.execMode}_plan.csv`;
-    a.click();
-    URL.revokeObjectURL(url);
-  }
+ // Market preset APPLY-TO-THIS-ORDER ONLY
 
-  // Log snapshot (store current state)
-  function logSnapshot() {
-    const snap: Snapshot = {
-      at: nowHHMMSS(),
-      currentVol: order.currentVol,
-      expectedContVol: order.expectedContVol,
-      expectedAuctionVol: order.expectedAuctionVol,
-      orderExecQty: order.orderExecQty,
-      orderExecNotional: order.orderExecNotional,
-      marketTurnover: order.marketTurnover,
-      marketVWAPInput: order.marketVWAPInput,
-    };
-    onChange({ ...order, snapshots: [...order.snapshots, snap] });
-  }
+ function applyMarketPreset(m: MarketKey, startFromNow: boolean) {
 
-  // Colors for status
-  const statusPill = order.completed ? "bg-green-600 text-white" : "bg-slate-900 text-white";
+   const p = MARKET_PRESET[m];
 
-  return (
-    <div className={`rounded-2xl shadow border ${t.border} bg-white overflow-hidden`}>
-      {/* Header */}
-      <div className={`px-4 py-3 border-b ${t.border} flex items-center justify-between`}>
-        <div className="flex items-center gap-3">
-          <span className={`inline-flex items-center px-2.5 py-1 rounded-full text-xs font-semibold ${t.bgSoft} ${t.text}`}>
-            {order.side}
-          </span>
-          <div className="text-sm opacity-70">
-            Local time (CLT): <span className="font-mono">{clock}</span>
-          </div>
-        </div>
-        <div className="flex gap-2">
-          <button
-            onClick={() => onChange({ ...order, completed: !order.completed })}
-            className={`px-3 py-2 rounded-xl text-sm ${statusPill}`}
-          >
-            {order.completed ? "Completed" : "Mark Completed"}
-          </button>
-          <button onClick={downloadCSV} className="px-3 py-2 rounded-xl bg-slate-900 text-white text-sm">
-            Export CSV
-          </button>
-          <button onClick={onDuplicate} className="px-3 py-2 rounded-xl border text-sm">
-            Duplicate
-          </button>
-          <button onClick={onRemove} className="px-3 py-2 rounded-xl border text-sm">
-            Remove
-          </button>
-        </div>
-      </div>
+   const sStart = startFromNow ? nowHHMM() : p.start;
 
-      {/* Optional toast */}
-      {toast && (
-        <div className={`m-3 p-3 rounded-xl border text-sm ${t.bgSoft} ${t.text} ${t.border}`}>
-          ⚠️ {toast}
-        </div>
-      )}
+   onChange({
 
-      {/* Market preset row (per order) */}
-      <div className="px-4 py-2 flex flex-wrap items-center gap-2 text-sm">
-        <span className="opacity-70">Market:</span>
-        {(["Egypt", "Kuwait", "Qatar", "DFM", "ADX", "Saudi"] as MarketKey[]).map((m) => (
-          <button
-            key={m}
-            onClick={() => applyMarketPreset(m, !!order.startFromNow)}
-            className={`px-3 py-1.5 rounded-full border ${order.market === m ? "bg-slate-900 text-white" : "bg-white"}`}
-          >
-            {m}
-          </button>
-        ))}
-        <label className="flex items-center gap-2 ml-2">
-          <input
-            type="checkbox"
-            checked={!!order.startFromNow}
-            onChange={(e) => applyMarketPreset(order.market || "Qatar", e.target.checked)}
-          />
-          Start from now
+     ...order,
+
+     market: m,
+
+     startFromNow,
+
+     sessionStart: sStart,
+
+     sessionEnd: p.auction,
+
+     auctionStart: p.auction,
+
+     auctionEnd: p.auctionMatch,
+
+     talStart: p.talStart,
+
+     talEnd: p.talEnd,
+
+   });
+
+ }
+
+ 
+
+ const plan = buildPlan(order);
+
+ const metrics = computeMetrics(order, plan);
+
+ const alerts = buildAlerts(order, metrics);
+
+ 
+
+ const [showDetails, setShowDetails] = useState(false);
+
+ const [showCumCols, setShowCumCols] = useState(true);
+
+ 
+
+ // toast-y nudge for alerts (optional)
+
+ const [toast, setToast] = useState<string | null>(null);
+
+ useEffect(() => {
+
+   if (!alertsOn) return;
+
+   if (alerts.length) {
+
+    setToast(alerts[0]);
+
+     const id = setTimeout(() => setToast(null), 3500);
+
+     return () => clearTimeout(id);
+
+   }
+
+ }, [alertsOn, order.id, alerts]);
+
+ 
+
+ // CSV export
+
+ const csv = (() => {
+
+   const headers = ["Interval", "Expected Market Vol", "Max Allowed", "Suggested Qty", "Cum Suggested"];
+
+   const base = plan.rows.map((r) => [
+
+     r.interval,
+
+     r.expMktVol,
+
+     typeof r.maxAllowed === "number" ? r.maxAllowed : "∞",
+
+     r.suggestedQty,
+
+     r.cumSuggested,
+
+   ]);
+
+  base.push(["Auction", order.expectedAuctionVol, plan.auctionAllowed, plan.auctionPlanned, plan.accumSuggested]);
+
+   const esc = (v: any) => {
+
+     const s = String(v ?? "");
+
+     return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+
+   };
+
+   return [headers.join(",")]
+
+    .concat(base.map((r) => r.map(esc).join(",")))
+
+    .join("\n");
+
+ })();
+
+ function downloadCSV() {
+
+   const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
+
+   const url = URL.createObjectURL(blob);
+
+   const a = document.createElement("a");
+
+   a.href = url;
+
+   a.download = `${order.symbol}_${order.side}_${order.execMode}_plan.csv`;
+
+   a.click();
+
+  URL.revokeObjectURL(url);
+
+ }
+
+ 
+
+ // Log snapshot (store current state)
+
+ function logSnapshot() {
+
+   const snap: Snapshot = {
+
+     at: nowHHMMSS(),
+
+     currentVol: order.currentVol,
+
+     expectedContVol: order.expectedContVol,
+
+    expectedAuctionVol: order.expectedAuctionVol,
+
+     orderExecQty: order.orderExecQty,
+
+    orderExecNotional: order.orderExecNotional,
+
+     marketTurnover: order.marketTurnover,
+
+     marketVWAPInput: order.marketVWAPInput,
+
+   };
+
+   onChange({ ...order, snapshots: [...order.snapshots, snap] });
+
+ }
+
+ 
+
+ // Colors for status
+
+ const statusPill = order.completed ? "bg-green-600 text-white" : "bg-slate-900 text-white";
+
+ 
+
+ return (
+
+   <div className={`rounded-2xl shadow border ${t.border} bg-white overflow-hidden`}>
+
+     {/* Header */}
+
+     <div className={`px-4 py-3 border-b ${t.border} flex items-center justify-between`}>
+
+       <div className="flex items-center gap-3">
+
+         <span className={`inline-flex items-center px-2.5 py-1 rounded-full text-xs font-semibold ${t.bgSoft} ${t.text}`}>
+
+          {order.side}
+
+        </span>
+
+         <div className="text-sm opacity-70">
+
+           Local time (CLT): <span className="font-mono">{clock}</span>
+
+         </div>
+
+       </div>
+
+       <div className="flex gap-2">
+
+         <button
+
+          onClick={() => onChange({ ...order, completed: !order.completed })}
+
+          className={`px-3 py-2 rounded-xl text-sm ${statusPill}`}
+
+         >
+
+          {order.completed ? "Completed" : "Mark Completed"}
+
+        </button>
+
+         <button onClick={downloadCSV} className="px-3 py-2 rounded-xl bg-slate-900 text-white text-sm">
+
+           Export CSV
+
+        </button>
+
+         <button onClick={onDuplicate} className="px-3 py-2 rounded-xl border text-sm">
+
+           Duplicate
+
+        </button>
+
+         <button onClick={onRemove} className="px-3 py-2 rounded-xl border text-sm">
+
+           Remove
+
+        </button>
+
+       </div>
+
+     </div>
+
+ 
+
+     {/* Optional toast */}
+
+     {toast && (
+
+       <div className={`m-3 p-3 rounded-xl border text-sm ${t.bgSoft} ${t.text} ${t.border}`}>
+
+         ⚠️ {toast}
+
+       </div>
+
+     )}
+
+ 
+
+     {/* Market preset row (per order) */}
+
+     <div className="px-4 py-2 flex flex-wrap items-center gap-2 text-sm">
+
+       <span className="opacity-70">Market:</span>
+
+      {(["Egypt", "Kuwait", "Qatar", "DFM", "ADX", "Saudi"] as MarketKey[]).map((m) => (
+
+         <button
+
+           key={m}
+
+          onClick={() => applyMarketPreset(m, !!order.startFromNow)}
+
+          className={`px-3 py-1.5 rounded-full border ${order.market === m ? "bg-slate-900 text-white" : "bg-white"}`}
+
+         >
+
+           {m}
+
+        </button>
+
+       ))}
+
+       <label className="flex items-center gap-2 ml-2">
+
+         <input
+
+          type="checkbox"
+
+          checked={!!order.startFromNow}
+
+          onChange={(e) => applyMarketPreset(order.market || "Qatar", e.target.checked)}
+
+         />
+
+         Start from now
+
+       </label>
+
+       <span className="text-xs opacity-60 ml-2">Applies to this order only.</span>
+
+     </div>
+
+ 
+
+     {/* HUD: accumulators + progress + VWAP slip */}
+
+     <div className="px-4 py-2 grid grid-cols-2 md:grid-cols-6 gap-3 items-end">
+
+       <HeaderStat title="Name" value={
+
+         <input
+
+          className="border rounded-xl px-2 py-1 w-full"
+
+          value={order.name}
+
+          onChange={(e) => onChange({ ...order, name: e.target.value })}
+
+         />
+
+       }/>
+
+       <HeaderStat title="Symbol" value={<span className="font-mono">{order.symbol}</span>} />
+
+       <HeaderStat title="Suggested Accum" value={formatInt(metrics.suggestedAccum)} />
+
+       <HeaderStat title="Executed Accum" value={formatInt(metrics.executedAccum)} />
+
+       <HeaderStat title="Completion %" value={`${metrics.completionPct.toFixed(1)}%`} />
+
+       <HeaderStat title="VWAP Slip" value={`${Number.isFinite(metrics.slipBps) ? metrics.slipBps.toFixed(1) : "—"} bps`} />
+
+       <div className="col-span-2 md:col-span-6 flex flex-col gap-1">
+
+         <div className="text-xs opacity-60">Progress</div>
+
+         <div className="w-full h-2 rounded-full bg-slate-200 overflow-hidden">
+
+           <div
+
+            className={`h-2 ${t.strong}`}
+
+             style={{ width: `${Math.min(100, Math.round((metrics.suggestedAccum / Math.max(1, order.orderQty)) * 100))}%` }}
+
+           />
+
+         </div>
+
+         <div className="text-xs opacity-60">
+
+           Planned: {formatInt(metrics.suggestedAccum)} / {formatInt(order.orderQty)} · Remaining (vs executed) {formatInt(metrics.remaining)}
+
+         </div>
+
+       </div>
+
+     </div>
+
+ 
+
+     {/* Alerts line + next action */}
+
+     <div className="px-4 py-2 flex flex-wrap items-center gap-2">
+
+       {alerts.length === 0 ? (
+
+         <span className="text-xs px-2.5 py-1 rounded-full bg-slate-100">All checks OK</span>
+
+       ) : (
+
+        alerts.map((a, i) => (
+
+           <span key={i} className={`text-xs px-2.5 py-1 rounded-full border ${t.border} ${t.bgSoft} ${t.text}`}>{a}</span>
+
+         ))
+
+       )}
+
+      {metrics.liveRow && (
+
+         <span className={`ml-auto text-xs px-2.5 py-1 rounded-full text-white ${t.strong}`}>
+
+           Next: {formatInt(metrics.liveRow.suggestedQty)} in {metrics.liveRow.interval}
+
+        </span>
+
+       )}
+
+     </div>
+
+ 
+
+     {/* Compact inputs + VWAP */}
+
+     <div className="px-4 pb-4 grid grid-cols-1 md:grid-cols-3 gap-4">
+
+       <div className="space-y-3">
+
+         <h3 className="font-semibold">Order</h3>
+
+         <label className="text-sm">
+
+           Symbol
+
+           <input
+
+            className="mt-1 w-full border rounded-xl p-2"
+
+            value={order.symbol}
+
+            onChange={(e) => onChange({ ...order, symbol: e.target.value.toUpperCase() })}
+
+           />
+
         </label>
-        <span className="text-xs opacity-60 ml-2">Applies to this order only.</span>
-      </div>
 
-      {/* HUD: accumulators + progress + VWAP slip */}
-      <div className="px-4 py-2 grid grid-cols-2 md:grid-cols-6 gap-3 items-end">
-        <HeaderStat title="Name" value={
-          <input
-            className="border rounded-xl px-2 py-1 w-full"
-            value={order.name}
-            onChange={(e) => onChange({ ...order, name: e.target.value })}
-          />
-        }/>
-        <HeaderStat title="Symbol" value={<span className="font-mono">{order.symbol}</span>} />
-        <HeaderStat title="Suggested Accum" value={formatInt(metrics.suggestedAccum)} />
-        <HeaderStat title="Executed Accum" value={formatInt(metrics.executedAccum)} />
-        <HeaderStat title="Completion %" value={`${metrics.completionPct.toFixed(1)}%`} />
-        <HeaderStat title="VWAP Slip" value={`${Number.isFinite(metrics.slipBps) ? metrics.slipBps.toFixed(1) : "—"} bps`} />
-        <div className="col-span-2 md:col-span-6 flex flex-col gap-1">
-          <div className="text-xs opacity-60">Progress</div>
-          <div className="w-full h-2 rounded-full bg-slate-200 overflow-hidden">
-            <div
-              className={`h-2 ${t.strong}`}
-              style={{ width: `${Math.min(100, Math.round((metrics.suggestedAccum / Math.max(1, order.orderQty)) * 100))}%` }}
-            />
-          </div>
-          <div className="text-xs opacity-60">
-            Planned: {formatInt(metrics.suggestedAccum)} / {formatInt(order.orderQty)} · Remaining (vs executed) {formatInt(metrics.remaining)}
-          </div>
-        </div>
-      </div>
+         <label className="text-sm">
 
-      {/* Alerts line + next action */}
-      <div className="px-4 py-2 flex flex-wrap items-center gap-2">
-        {alerts.length === 0 ? (
-          <span className="text-xs px-2.5 py-1 rounded-full bg-slate-100">All checks OK</span>
-        ) : (
-          alerts.map((a, i) => (
-            <span key={i} className={`text-xs px-2.5 py-1 rounded-full border ${t.border} ${t.bgSoft} ${t.text}`}>{a}</span>
-          ))
-        )}
-        {metrics.liveRow && (
-          <span className={`ml-auto text-xs px-2.5 py-1 rounded-full text-white ${t.strong}`}>
-            Next: {formatInt(metrics.liveRow.suggestedQty)} in {metrics.liveRow.interval}
-          </span>
-        )}
-      </div>
+           Side
 
-      {/* Compact inputs + VWAP */}
-      <div className="px-4 pb-4 grid grid-cols-1 md:grid-cols-3 gap-4">
-        <div className="space-y-3">
-          <h3 className="font-semibold">Order</h3>
-          <label className="text-sm">
-            Symbol
+           <select
+
+            className="mt-1 w-full border rounded-xl p-2"
+
+            value={order.side}
+
+            onChange={(e) => onChange({ ...order, side: e.target.value as Side })}
+
+           >
+
+            <option value="BUY">BUY</option>
+
+            <option value="SELL">SELL</option>
+
+          </select>
+
+        </label>
+
+         <IntInput label="Order Qty (shares)" value={order.orderQty} onChange={(n) => onChange({ ...order, orderQty: n })} />
+
+         <label className="text-sm">
+
+           Mode
+
+           <select
+
+            className="mt-1 w-full border rounded-xl p-2"
+
+            value={order.execMode}
+
+            onChange={(e) => onChange({ ...order, execMode: e.target.value as ExecMode })}
+
+           >
+
+            <option value="OTD">OTD (time-sliced)</option>
+
+            <option value="INLINE">Inline (POV)</option>
+
+          </select>
+
+        </label>
+
+         <label className="text-sm">
+
+           Cap
+
+           <select
+
+            className="mt-1 w-full border rounded-xl p-2"
+
+            value={order.capMode}
+
+            onChange={(e) => onChange({ ...order, capMode: e.target.value as CapMode })}
+
+           >
+
+            <option value="PCT">Max % of Volume</option>
+
+            <option value="NONE">No Volume Cap</option>
+
+          </select>
+
+        </label>
+
+        {order.capMode === "PCT" && (
+
+           <label className="text-sm">
+
+             Max Participation %
+
             <input
-              className="mt-1 w-full border rounded-xl p-2"
-              value={order.symbol}
-              onChange={(e) => onChange({ ...order, symbol: e.target.value.toUpperCase() })}
-            />
-          </label>
-          <label className="text-sm">
-            Side
-            <select
-              className="mt-1 w-full border rounded-xl p-2"
-              value={order.side}
-              onChange={(e) => onChange({ ...order, side: e.target.value as Side })}
-            >
-              <option value="BUY">BUY</option>
-              <option value="SELL">SELL</option>
-            </select>
-          </label>
-          <IntInput label="Order Qty (shares)" value={order.orderQty} onChange={(n) => onChange({ ...order, orderQty: n })} />
-          <label className="text-sm">
-            Mode
-            <select
-              className="mt-1 w-full border rounded-xl p-2"
-              value={order.execMode}
-              onChange={(e) => onChange({ ...order, execMode: e.target.value as ExecMode })}
-            >
-              <option value="OTD">OTD (time-sliced)</option>
-              <option value="INLINE">Inline (POV)</option>
-            </select>
-          </label>
-          <label className="text-sm">
-            Cap
-            <select
-              className="mt-1 w-full border rounded-xl p-2"
-              value={order.capMode}
-              onChange={(e) => onChange({ ...order, capMode: e.target.value as CapMode })}
-            >
-              <option value="PCT">Max % of Volume</option>
-              <option value="NONE">No Volume Cap</option>
-            </select>
-          </label>
-          {order.capMode === "PCT" && (
-            <label className="text-sm">
-              Max Participation %
-              <input
-                type="number"
-                className="mt-1 w-full border rounded-xl p-2"
-                value={order.maxPart}
-                onChange={(e) => onChange({ ...order, maxPart: Math.max(0, parseFloat(e.target.value || "0")) })}
-              />
-            </label>
-          )}
-          <label className="text-sm">
-            Reserve for Auction %
-            <input
+
               type="number"
+
               className="mt-1 w-full border rounded-xl p-2"
-              value={order.reserveAuctionPct}
-              onChange={(e) => onChange({ ...order, reserveAuctionPct: Math.max(0, parseFloat(e.target.value || "0")) })}
-            />
+
+              value={order.maxPart}
+
+              onChange={(e) => onChange({ ...order, maxPart: Math.max(0, parseFloat(e.target.value || "0")) })}
+
+             />
+
           </label>
-          <label className="text-sm flex items-center gap-2">
+
+         )}
+
+         <label className="text-sm">
+
+           Reserve for Auction %
+
+           <input
+
+            type="number"
+
+            className="mt-1 w-full border rounded-xl p-2"
+
+            value={order.reserveAuctionPct}
+
+            onChange={(e) => onChange({ ...order, reserveAuctionPct: Math.max(0, parseFloat(e.target.value || "0")) })}
+
+           />
+
+        </label>
+
+         <label className="text-sm flex items-center gap-2">
+
+           <input
+
+            type="checkbox"
+
+            checked={order.deferCompletion}
+
+            onChange={(e) => onChange({ ...order, deferCompletion: e.target.checked })}
+
+           />
+
+           Do not complete before end
+
+        </label>
+
+       </div>
+
+ 
+
+       <div className="space-y-3">
+
+         <h3 className="font-semibold">Timing (CLT)</h3>
+
+         <div className="grid grid-cols-2 gap-3">
+
+           <label className="text-sm">
+
+             Session Start
+
             <input
-              type="checkbox"
-              checked={order.deferCompletion}
-              onChange={(e) => onChange({ ...order, deferCompletion: e.target.checked })}
-            />
-            Do not complete before end
+
+              type="time"
+
+              className="mt-1 w-full border rounded-xl p-2"
+
+              value={order.sessionStart}
+
+              onChange={(e) => onChange({ ...order, sessionStart: e.target.value })}
+
+             />
+
           </label>
-        </div>
 
-        <div className="space-y-3">
-          <h3 className="font-semibold">Timing (CLT)</h3>
-          <div className="grid grid-cols-2 gap-3">
-            <label className="text-sm">
-              Session Start
-              <input
-                type="time"
-                className="mt-1 w-full border rounded-xl p-2"
-                value={order.sessionStart}
-                onChange={(e) => onChange({ ...order, sessionStart: e.target.value })}
-              />
-            </label>
-            <label className="text-sm">
-              Session End
-              <input
-                type="time"
-                className="mt-1 w-full border rounded-xl p-2"
-                value={order.sessionEnd}
-                onChange={(e) => onChange({ ...order, sessionEnd: e.target.value })}
-              />
-            </label>
-            <label className="text-sm">
-              Auction Start
-              <input
-                type="time"
-                className="mt-1 w-full border rounded-xl p-2"
-                value={order.auctionStart}
-                onChange={(e) => onChange({ ...order, auctionStart: e.target.value })}
-              />
-            </label>
-            <label className="text-sm">
-              Auction End
-              <input
-                type="time"
-                className="mt-1 w-full border rounded-xl p-2"
-                value={order.auctionEnd}
-                onChange={(e) => onChange({ ...order, auctionEnd: e.target.value })}
-              />
-            </label>
-            <label className="text-sm">
-              TAL Start
-              <input
-                type="time"
-                className="mt-1 w-full border rounded-xl p-2"
-                value={order.talStart}
-                onChange={(e) => onChange({ ...order, talStart: e.target.value })}
-              />
-            </label>
-            <label className="text-sm">
-              TAL End
-              <input
-                type="time"
-                className="mt-1 w-full border rounded-xl p-2"
-                value={order.talEnd}
-                onChange={(e) => onChange({ ...order, talEnd: e.target.value })}
-              />
-            </label>
-            <label className="text-sm">
-              Interval Minutes
-              <input
-                type="number"
-                className="mt-1 w-full border rounded-xl p-2"
-                value={order.intervalMins}
-                onChange={(e) => onChange({ ...order, intervalMins: Math.max(1, parseInt(e.target.value || "1")) })}
-              />
-            </label>
-            <label className="text-sm">
-              Curve
-              <select
-                className="mt-1 w-full border rounded-xl p-2"
-                value={order.curve}
-                onChange={(e) => onChange({ ...order, curve: e.target.value as Curve })}
-              >
-                <option value="ucurve">U-curve</option>
-                <option value="equal">Equal</option>
-              </select>
-            </label>
-          </div>
-        </div>
+           <label className="text-sm">
 
-        <div className="space-y-3">
-          <h3 className="font-semibold">Volumes & VWAP</h3>
-          <div className="grid grid-cols-2 gap-3">
-            <IntInput label="Start Vol (can be 0)" value={order.startVol} onChange={(n) => onChange({ ...order, startVol: n })} />
-            <IntInput label="Current Vol (cum)" value={order.currentVol} onChange={(n) => onChange({ ...order, currentVol: n })} />
-            <IntInput className="col-span-2" label="Expected Continuous Vol" value={order.expectedContVol} onChange={(n) => onChange({ ...order, expectedContVol: n })} />
-            <IntInput className="col-span-2" label="Expected Auction Vol" value={order.expectedAuctionVol} onChange={(n) => onChange({ ...order, expectedAuctionVol: n })} />
-          </div>
-          <MoneyInput label="Market Turnover" value={order.marketTurnover} onNumberChange={(n) => onChange({ ...order, marketTurnover: n })} />
-          <MoneyInput label="OR Enter Market VWAP" value={order.marketVWAPInput} onNumberChange={(n) => onChange({ ...order, marketVWAPInput: n })} />
-          <IntInput label="Your Executed Qty" value={order.orderExecQty} onChange={(n) => onChange({ ...order, orderExecQty: n })} />
-          <MoneyInput label="Your Executed Notional" value={order.orderExecNotional} onNumberChange={(n) => onChange({ ...order, orderExecNotional: n })} />
-          <VWAPBox order={order} />
-        </div>
-      </div>
+             Session End
 
-      {/* More details (collapsible) */}
-      <div className="px-4 pb-4">
-        <div className="flex items-center justify-between mb-2">
-          <div className="flex items-center gap-2">
-            <button onClick={() => setShowDetails((s) => !s)} className="px-2 py-1 text-xs border rounded">
-              {showDetails ? "Hide details" : "Show details"}
-            </button>
-            {showDetails && (
-              <label className="text-xs flex items-center gap-2 ml-2">
-                <input type="checkbox" checked={showCumCols} onChange={(e) => setShowCumCols(e.target.checked)} />
-                Show cumulative columns
-              </label>
-            )}
-          </div>
-          <div className="flex items-center gap-2">
-            <button onClick={logSnapshot} className={`px-2.5 py-1.5 rounded-lg text-xs text-white ${t.strong}`}>
-              Log snapshot
-            </button>
-          </div>
-        </div>
+            <input
 
-        {showDetails && (
-          <>
-            <div className="overflow-x-auto rounded-xl border mb-3">
-              <table className="w-full text-sm">
-                <thead className="sticky top-0 bg-white">
-                  <tr className="text-left border-b">
-                    <th className="py-2 pr-2">Interval</th>
-                    <th className="py-2 pr-2">Expected Mkt Vol</th>
-                    <th className="py-2 pr-2">Max Allowed</th>
-                    <th className="py-2 pr-2">Suggested Qty</th>
-                    {showCumCols && <th className="py-2 pr-2">Cum Suggested</th>}
-                  </tr>
-                </thead>
-                <tbody>
-                  {plan.rows.map((r) => {
-                    const cur = nowHHMM() + ":00";
-                    const isLive = cur >= r.s && cur < r.e;
-                    return (
-                      <tr key={r.interval} className={`border-b last:border-0 ${isLive ? `${t.bgSoft} animate-pulse` : ""}`}>
-                        <td className={`py-2 pr-2 ${t.text}`}>{r.interval}</td>
-                        <td className="py-2 pr-2">{formatInt(r.expMktVol)}</td>
-                        <td className="py-2 pr-2">{typeof r.maxAllowed === "number" ? formatInt(r.maxAllowed) : r.maxAllowed}</td>
-                        <td className="py-2 pr-2 font-semibold">{formatInt(r.suggestedQty)}</td>
-                        {showCumCols && <td className="py-2 pr-2">{formatInt(r.cumSuggested)}</td>}
-                      </tr>
-                    );
-                  })}
-                  <tr className="bg-slate-50">
-                    <td className="py-2 pr-2 font-semibold">
-                      Auction {order.auctionStart}–{order.auctionEnd}
-                    </td>
-                    <td className="py-2 pr-2">{formatInt(order.expectedAuctionVol)}</td>
-                    <td className="py-2 pr-2">{formatInt(plan.auctionAllowed)}</td>
-                    <td className="py-2 pr-2 font-semibold">{formatInt(plan.auctionPlanned)}</td>
-                    {showCumCols && <td className="py-2 pr-2">{formatInt(plan.accumSuggested)}</td>}
-                  </tr>
-                </tbody>
-                <tfoot>
-                  <tr className="border-t">
-                    <td className="py-2 pr-2 font-semibold">Totals</td>
-                    <td className="py-2 pr-2">
-                      {formatInt(order.startVol + order.currentVol + order.expectedContVol + order.expectedAuctionVol)}
-                    </td>
-                    <td className="py-2 pr-2">—</td>
-                    <td className="py-2 pr-2 font-semibold">
-                      {formatInt(plan.contPlanned + plan.auctionPlanned)} (Remain vs order {formatInt(Math.max(0, order.orderQty - (plan.contPlanned + plan.auctionPlanned)))} )
-                    </td>
-                    {showCumCols && <td className="py-2 pr-2">{formatInt(plan.accumSuggested)}</td>}
-                  </tr>
-                </tfoot>
-              </table>
-            </div>
+              type="time"
 
-            {/* Snapshot history */}
-            <div className="rounded-xl border">
-              <div className="px-3 py-2 text-sm font-medium">Snapshots (latest first)</div>
-              <div className="overflow-x-auto">
-                <table className="w-full text-xs">
-                  <thead className="bg-slate-50">
-                    <tr className="text-left">
-                      <th className="p-2">Time</th>
-                      <th className="p-2">Cur Vol</th>
-                      <th className="p-2">Exp Cont</th>
-                      <th className="p-2">Exp Auction</th>
-                      <th className="p-2">Exec Qty</th>
-                      <th className="p-2">Exec Notional</th>
-                      <th className="p-2">Turnover</th>
-                      <th className="p-2">Manual VWAP</th>
+              className="mt-1 w-full border rounded-xl p-2"
+
+              value={order.sessionEnd}
+
+              onChange={(e) => onChange({ ...order, sessionEnd: e.target.value })}
+
+             />
+
+          </label>
+
+           <label className="text-sm">
+
+             Auction Start
+
+            <input
+
+              type="time"
+
+              className="mt-1 w-full border rounded-xl p-2"
+
+              value={order.auctionStart}
+
+              onChange={(e) => onChange({ ...order, auctionStart: e.target.value })}
+
+             />
+
+          </label>
+
+           <label className="text-sm">
+
+             Auction End
+
+            <input
+
+              type="time"
+
+              className="mt-1 w-full border rounded-xl p-2"
+
+              value={order.auctionEnd}
+
+              onChange={(e) => onChange({ ...order, auctionEnd: e.target.value })}
+
+             />
+
+          </label>
+
+           <label className="text-sm">
+
+             TAL Start
+
+            <input
+
+              type="time"
+
+              className="mt-1 w-full border rounded-xl p-2"
+
+              value={order.talStart}
+
+              onChange={(e) => onChange({ ...order, talStart: e.target.value })}
+
+             />
+
+          </label>
+
+           <label className="text-sm">
+
+             TAL End
+
+            <input
+
+              type="time"
+
+              className="mt-1 w-full border rounded-xl p-2"
+
+              value={order.talEnd}
+
+              onChange={(e) => onChange({ ...order, talEnd: e.target.value })}
+
+             />
+
+          </label>
+
+           <label className="text-sm">
+
+             Interval Minutes
+
+            <input
+
+              type="number"
+
+              className="mt-1 w-full border rounded-xl p-2"
+
+              value={order.intervalMins}
+
+              onChange={(e) => onChange({ ...order, intervalMins: Math.max(1, parseInt(e.target.value || "1")) })}
+
+             />
+
+          </label>
+
+           <label className="text-sm">
+
+             Curve
+
+            <select
+
+              className="mt-1 w-full border rounded-xl p-2"
+
+              value={order.curve}
+
+              onChange={(e) => onChange({ ...order, curve: e.target.value as Curve })}
+
+             >
+
+              <option value="ucurve">U-curve</option>
+
+              <option value="equal">Equal</option>
+
+            </select>
+
+          </label>
+
+         </div>
+
+       </div>
+
+ 
+
+       <div className="space-y-3">
+
+         <h3 className="font-semibold">Volumes & VWAP</h3>
+
+         <div className="grid grid-cols-2 gap-3">
+
+          <IntInput label="Start Vol (can be 0)" value={order.startVol} onChange={(n) => onChange({ ...order, startVol: n })} />
+
+          <IntInput label="Current Vol (cum)" value={order.currentVol} onChange={(n) => onChange({ ...order, currentVol: n })} />
+
+          <IntInput className="col-span-2" label="Expected Continuous Vol" value={order.expectedContVol} onChange={(n) => onChange({ ...order, expectedContVol: n })} />
+
+          <IntInput className="col-span-2" label="Expected Auction Vol" value={order.expectedAuctionVol} onChange={(n) => onChange({ ...order, expectedAuctionVol: n })} />
+
+         </div>
+
+        <MoneyInput label="Market Turnover" value={order.marketTurnover} onNumberChange={(n) => onChange({ ...order, marketTurnover: n })} />
+
+        <MoneyInput label="OR Enter Market VWAP" value={order.marketVWAPInput} onNumberChange={(n) => onChange({ ...order, marketVWAPInput: n })} />
+
+         <IntInput label="Your Executed Qty" value={order.orderExecQty} onChange={(n) => onChange({ ...order, orderExecQty: n })} />
+
+        <MoneyInput label="Your Executed Notional" value={order.orderExecNotional} onNumberChange={(n) => onChange({ ...order, orderExecNotional: n })} />
+
+         <VWAPBox order={order} />
+
+       </div>
+
+     </div>
+
+ 
+
+     {/* More details (collapsible) */}
+
+     <div className="px-4 pb-4">
+
+       <div className="flex items-center justify-between mb-2">
+
+         <div className="flex items-center gap-2">
+
+           <button onClick={() => setShowDetails((s) => !s)} className="px-2 py-1 text-xs border rounded">
+
+            {showDetails ? "Hide details" : "Show details"}
+
+          </button>
+
+          {showDetails && (
+
+            <label className="text-xs flex items-center gap-2 ml-2">
+
+              <input type="checkbox" checked={showCumCols} onChange={(e) => setShowCumCols(e.target.checked)} />
+
+               Show cumulative columns
+
+            </label>
+
+           )}
+
+         </div>
+
+         <div className="flex items-center gap-2">
+
+           <button onClick={logSnapshot} className={`px-2.5 py-1.5 rounded-lg text-xs text-white ${t.strong}`}>
+
+             Log snapshot
+
+          </button>
+
+         </div>
+
+       </div>
+
+ 
+
+       {showDetails && (
+
+         <>
+
+           <div className="overflow-x-auto rounded-xl border mb-3">
+
+            <table className="w-full text-sm">
+
+              <thead className="sticky top-0 bg-white">
+
+                <tr className="text-left border-b">
+
+                  <th className="py-2 pr-2">Interval</th>
+
+                  <th className="py-2 pr-2">Expected Mkt Vol</th>
+
+                  <th className="py-2 pr-2">Max Allowed</th>
+
+                  <th className="py-2 pr-2">Suggested Qty</th>
+
+                  {showCumCols && <th className="py-2 pr-2">Cum Suggested</th>}
+
+                </tr>
+
+              </thead>
+
+              <tbody>
+
+                {plan.rows.map((r) => {
+
+                  const cur = nowHHMM() + ":00";
+
+                  const isLive = cur >= r.s && cur < r.e;
+
+                  return (
+
+                    <tr key={r.interval} className={`border-b last:border-0 ${isLive ? `${t.bgSoft} animate-pulse` : ""}`}>
+
+                      <td className={`py-2 pr-2 ${t.text}`}>{r.interval}</td>
+
+                      <td className="py-2 pr-2">{formatInt(r.expMktVol)}</td>
+
+                      <td className="py-2 pr-2">{typeof r.maxAllowed === "number" ? formatInt(r.maxAllowed) : r.maxAllowed}</td>
+
+                      <td className="py-2 pr-2 font-semibold">{formatInt(r.suggestedQty)}</td>
+
+                      {showCumCols && <td className="py-2 pr-2">{formatInt(r.cumSuggested)}</td>}
+
                     </tr>
-                  </thead>
-                  <tbody>
-                    {[...order.snapshots].reverse().map((s, i) => (
-                      <tr key={i} className="border-t">
-                        <td className="p-2 font-mono">{s.at}</td>
-                        <td className="p-2">{formatInt(s.currentVol)}</td>
-                        <td className="p-2">{formatInt(s.expectedContVol)}</td>
-                        <td className="p-2">{formatInt(s.expectedAuctionVol)}</td>
-                        <td className="p-2">{formatInt(s.orderExecQty)}</td>
-                        <td className="p-2">{formatMoney(s.orderExecNotional, 2)}</td>
-                        <td className="p-2">{formatMoney(s.marketTurnover, 2)}</td>
-                        <td className="p-2">{s.marketVWAPInput ? formatMoney(s.marketVWAPInput, 4) : "—"}</td>
-                      </tr>
-                    ))}
-                    {order.snapshots.length === 0 && (
-                      <tr>
-                        <td className="p-2 text-slate-500" colSpan={8}>
-                          No snapshots yet. Click “Log snapshot” whenever you update the fields to track progress & refine guidance.
-                        </td>
-                      </tr>
-                    )}
-                  </tbody>
-                </table>
-              </div>
+
+                   );
+
+                 })}
+
+                <tr className="bg-slate-50">
+
+                  <td className="py-2 pr-2 font-semibold">
+
+                    Auction {order.auctionStart}–{order.auctionEnd}
+
+                  </td>
+
+                  <td className="py-2 pr-2">{formatInt(order.expectedAuctionVol)}</td>
+
+                  <td className="py-2 pr-2">{formatInt(plan.auctionAllowed)}</td>
+
+                  <td className="py-2 pr-2 font-semibold">{formatInt(plan.auctionPlanned)}</td>
+
+                  {showCumCols && <td className="py-2 pr-2">{formatInt(plan.accumSuggested)}</td>}
+
+                </tr>
+
+              </tbody>
+
+              <tfoot>
+
+                <tr className="border-t">
+
+                  <td className="py-2 pr-2 font-semibold">Totals</td>
+
+                  <td className="py-2 pr-2">
+
+                    {formatInt(order.startVol + order.currentVol + order.expectedContVol + order.expectedAuctionVol)}
+
+                  </td>
+
+                  <td className="py-2 pr-2">—</td>
+
+                  <td className="py-2 pr-2 font-semibold">
+
+                    {formatInt(plan.contPlanned + plan.auctionPlanned)} (Remain vs order {formatInt(Math.max(0, order.orderQty - (plan.contPlanned + plan.auctionPlanned)))} )
+
+                  </td>
+
+                  {showCumCols && <td className="py-2 pr-2">{formatInt(plan.accumSuggested)}</td>}
+
+                </tr>
+
+              </tfoot>
+
+            </table>
+
+          </div>
+
+ 
+
+           {/* Snapshot history */}
+
+           <div className="rounded-xl border">
+
+             <div className="px-3 py-2 text-sm font-medium">Snapshots (latest first)</div>
+
+             <div className="overflow-x-auto">
+
+              <table className="w-full text-xs">
+
+                <thead className="bg-slate-50">
+
+                  <tr className="text-left">
+
+                    <th className="p-2">Time</th>
+
+                    <th className="p-2">Cur Vol</th>
+
+                    <th className="p-2">Exp Cont</th>
+
+                    <th className="p-2">Exp Auction</th>
+
+                    <th className="p-2">Exec Qty</th>
+
+                    <th className="p-2">Exec Notional</th>
+
+                    <th className="p-2">Turnover</th>
+
+                    <th className="p-2">Manual VWAP</th>
+
+                  </tr>
+
+                </thead>
+
+                <tbody>
+
+                  {[...order.snapshots].reverse().map((s, i) => (
+
+                    <tr key={i} className="border-t">
+
+                      <td className="p-2 font-mono">{s.at}</td>
+
+                      <td className="p-2">{formatInt(s.currentVol)}</td>
+
+                      <td className="p-2">{formatInt(s.expectedContVol)}</td>
+
+                      <td className="p-2">{formatInt(s.expectedAuctionVol)}</td>
+
+                      <td className="p-2">{formatInt(s.orderExecQty)}</td>
+
+                      <td className="p-2">{formatMoney(s.orderExecNotional, 2)}</td>
+
+                      <td className="p-2">{formatMoney(s.marketTurnover, 2)}</td>
+
+                      <td className="p-2">{s.marketVWAPInput ? formatMoney(s.marketVWAPInput, 4) : "—"}</td>
+
+                    </tr>
+
+                  ))}
+
+                  {order.snapshots.length === 0 && (
+
+                    <tr>
+
+                      <td className="p-2 text-slate-500" colSpan={8}>
+
+                        No snapshots yet. Click “Log snapshot” whenever you update the fields to track progress & refine guidance.
+
+                      </td>
+
+                    </tr>
+
+                   )}
+
+                </tbody>
+
+              </table>
+
             </div>
-          </>
-        )}
-      </div>
-    </div>
-  );
+
+          </div>
+
+         </>
+
+       )}
+
+     </div>
+
+   </div>
+
+ );
+
 }
+
+ 
 
 /* -------------------- Aggregates, Rail & App Shell -------------------- */
+
 type Aggregates = {
-  qtyTotal: number;
-  plannedTotal: number;
-  execQty: number;
-  execNotional: number;
-  marketTurnoverApprox: number;
-  marketVolTotal: number;
+
+ qtyTotal: number;
+
+ plannedTotal: number;
+
+ execQty: number;
+
+ execNotional: number;
+
+marketTurnoverApprox: number;
+
+ marketVolTotal: number;
+
 };
+
 function aggregateOrders(orders: Order[]): Aggregates {
-  return orders.reduce<Aggregates>(
-    (agg, o) => {
-      const { contPlanned, auctionPlanned } = buildPlan(o);
-      const planned = contPlanned + auctionPlanned;
-      const marketVWAP =
-        o.currentVol > 0
-          ? o.marketTurnover > 0
-            ? o.marketTurnover / o.currentVol
-            : o.marketVWAPInput || 0
-          : o.marketVWAPInput || 0;
-      const turnoverApprox = o.marketTurnover > 0 ? o.marketTurnover : marketVWAP * o.currentVol;
-      return {
-        qtyTotal: agg.qtyTotal + o.orderQty,
-        plannedTotal: agg.plannedTotal + planned,
-        execQty: agg.execQty + o.orderExecQty,
-        execNotional: agg.execNotional + o.orderExecNotional,
-        marketTurnoverApprox: agg.marketTurnoverApprox + turnoverApprox,
-        marketVolTotal: agg.marketVolTotal + o.currentVol,
-      };
-    },
-    { qtyTotal: 0, plannedTotal: 0, execQty: 0, execNotional: 0, marketTurnoverApprox: 0, marketVolTotal: 0 }
-  );
+
+ return orders.reduce<Aggregates>(
+
+   (agg, o) => {
+
+     const { contPlanned, auctionPlanned } = buildPlan(o);
+
+     const planned = contPlanned + auctionPlanned;
+
+     const marketVWAP =
+
+       o.currentVol > 0
+
+         ? o.marketTurnover > 0
+
+           ? o.marketTurnover / o.currentVol
+
+           : o.marketVWAPInput || 0
+
+         : o.marketVWAPInput || 0;
+
+     const turnoverApprox = o.marketTurnover > 0 ? o.marketTurnover : marketVWAP * o.currentVol;
+
+     return {
+
+       qtyTotal: agg.qtyTotal + o.orderQty,
+
+       plannedTotal: agg.plannedTotal + planned,
+
+       execQty: agg.execQty + o.orderExecQty,
+
+       execNotional: agg.execNotional + o.orderExecNotional,
+
+      marketTurnoverApprox: agg.marketTurnoverApprox + turnoverApprox,
+
+      marketVolTotal: agg.marketVolTotal + o.currentVol,
+
+     };
+
+   },
+
+   { qtyTotal: 0, plannedTotal: 0, execQty: 0, execNotional: 0, marketTurnoverApprox: 0, marketVolTotal: 0 }
+
+ );
+
 }
+
 function SummaryCard({
-  title,
-  tint,
-  ag,
-  side,
+
+ title,
+
+ tint,
+
+ ag,
+
+ side,
+
 }: {
-  title: string;
-  tint: "emerald" | "rose" | "slate";
-  ag: Aggregates;
-  side?: Side;
+
+ title: string;
+
+ tint: "emerald" | "rose" | "slate";
+
+ ag: Aggregates;
+
+ side?: Side;
+
 }) {
-  const progress = ag.qtyTotal > 0 ? Math.min(100, Math.round((ag.plannedTotal / ag.qtyTotal) * 100)) : 0;
-  const orderVWAP = ag.execQty > 0 ? ag.execNotional / ag.execQty : 0;
-  const marketVWAP = ag.marketVolTotal > 0 ? ag.marketTurnoverApprox / ag.marketVolTotal : 0;
-  const perf = side ? performanceBps(side, orderVWAP, marketVWAP) : orderVWAP && marketVWAP ? ((orderVWAP - marketVWAP) / marketVWAP) * 10000 : 0;
 
-  const color = perf > 0 ? "text-green-600" : perf < 0 ? "text-red-600" : "";
-  const bg = tint === "emerald" ? "bg-emerald-50" : tint === "rose" ? "bg-rose-50" : "bg-slate-100";
-  const bar = tint === "emerald" ? "bg-emerald-600" : tint === "rose" ? "bg-rose-600" : "bg-slate-600";
+ const progress = ag.qtyTotal > 0 ? Math.min(100, Math.round((ag.plannedTotal / ag.qtyTotal) * 100)) : 0;
 
-  return (
-    <div className={`rounded-2xl p-4 ${bg} border`}>
-      <div className="flex items-center justify-between">
-        <div className="font-semibold">{title}</div>
-        <div className="text-xs opacity-60">Planned {progress}%</div>
-      </div>
-      <div className="grid md:grid-cols-4 gap-3 text-sm mt-2">
-        <HeaderStat title="Total Qty" value={formatInt(ag.qtyTotal)} />
-        <HeaderStat title="Planned" value={formatInt(ag.plannedTotal)} />
-        <HeaderStat title="Executed" value={formatInt(ag.execQty)} />
-        <HeaderStat title="Remaining" value={formatInt(Math.max(0, ag.qtyTotal - ag.plannedTotal))} />
-      </div>
-      <div className="w-full h-2 rounded-full bg-white/60 overflow-hidden mt-2">
-        <div className={`h-2 ${bar}`} style={{ width: `${progress}%` }} />
-      </div>
-      <div className="text-xs mt-2">
-        Performance: <span className={color}>{Number.isFinite(perf) ? perf.toFixed(1) : "—"} bps</span>
-      </div>
-    </div>
-  );
+ const orderVWAP = ag.execQty > 0 ? ag.execNotional / ag.execQty : 0;
+
+ const marketVWAP = ag.marketVolTotal > 0 ? ag.marketTurnoverApprox / ag.marketVolTotal : 0;
+
+ const perf = side ? performanceBps(side, orderVWAP, marketVWAP) : orderVWAP && marketVWAP ? ((orderVWAP - marketVWAP) / marketVWAP) * 10000 : 0;
+
+ 
+
+ const color = perf > 0 ? "text-green-600" : perf < 0 ? "text-red-600" : "";
+
+ const bg = tint === "emerald" ? "bg-emerald-50" : tint === "rose" ? "bg-rose-50" : "bg-slate-100";
+
+ const bar = tint === "emerald" ? "bg-emerald-600" : tint === "rose" ? "bg-rose-600" : "bg-slate-600";
+
+ 
+
+ return (
+
+   <div className={`rounded-2xl p-4 ${bg} border`}>
+
+     <div className="flex items-center justify-between">
+
+       <div className="font-semibold">{title}</div>
+
+       <div className="text-xs opacity-60">Planned {progress}%</div>
+
+     </div>
+
+     <div className="grid md:grid-cols-4 gap-3 text-sm mt-2">
+
+       <HeaderStat title="Total Qty" value={formatInt(ag.qtyTotal)} />
+
+       <HeaderStat title="Planned" value={formatInt(ag.plannedTotal)} />
+
+       <HeaderStat title="Executed" value={formatInt(ag.execQty)} />
+
+       <HeaderStat title="Remaining" value={formatInt(Math.max(0, ag.qtyTotal - ag.plannedTotal))} />
+
+     </div>
+
+     <div className="w-full h-2 rounded-full bg-white/60 overflow-hidden mt-2">
+
+       <div className={`h-2 ${bar}`} style={{ width: `${progress}%` }} />
+
+     </div>
+
+     <div className="text-xs mt-2">
+
+       Performance: <span className={color}>{Number.isFinite(perf) ? perf.toFixed(1) : "—"} bps</span>
+
+     </div>
+
+   </div>
+
+ );
+
 }
+
+ 
 
 function OrdersRail({
-  orders,
-  selectedId,
-  onSelect,
+
+ orders,
+
+ selectedId,
+
+ onSelect,
+
 }: {
-  orders: Order[];
-  selectedId: string | null;
-  onSelect: (id: string | null) => void;
+
+ orders: Order[];
+
+ selectedId: string | null;
+
+ onSelect: (id: string | null) => void;
+
 }) {
-  return (
-    <aside className="hidden lg:block sticky top-20 h-[calc(100vh-6rem)] w-64 shrink-0 overflow-auto pl-2">
-      <div className="text-xs uppercase opacity-60 mb-2">Orders</div>
-      <div className="space-y-2">
-        <button
-          onClick={() => onSelect(null)}
-          className={`w-full text-left px-3 py-2 rounded-xl border ${selectedId === null ? "bg-slate-900 text-white" : "bg-white"}`}
-        >
-          ALL
-        </button>
-        {orders.map((o) => {
-          const th = theme(o.side);
-          const planned = buildPlan(o).accumSuggested;
-          const progress = Math.min(100, Math.round((planned / Math.max(1, o.orderQty)) * 100));
-          return (
-            <button
-              key={o.id}
-              onClick={() => onSelect(o.id)}
-              className={`w-full text-left px-3 py-2 rounded-xl border ${selectedId === o.id ? "bg-slate-900 text-white" : "bg-white"}`}
-            >
-              <div className="flex items-center justify-between">
-                <div className="font-medium text-sm">{o.name}</div>
-                <span className={`text-[10px] px-2 py-0.5 rounded-full ${th.bgSoft} ${th.text}`}>{o.side}</span>
-              </div>
-              <div className="text-xs opacity-70">{o.symbol} · {o.completed ? "Completed" : "Active"}</div>
-              <div className="w-full h-1.5 rounded-full bg-slate-200 mt-2 overflow-hidden">
-                <div className={`${th.strong} h-1.5`} style={{ width: `${progress}%` }} />
-              </div>
-            </button>
-          );
-        })}
-      </div>
-    </aside>
-  );
+
+ return (
+
+   <aside className="hidden lg:block sticky top-20 h-[calc(100vh-6rem)] w-64 shrink-0 overflow-auto pl-2">
+
+     <div className="text-xs uppercase opacity-60 mb-2">Orders</div>
+
+     <div className="space-y-2">
+
+       <button
+
+         onClick={() => onSelect(null)}
+
+        className={`w-full text-left px-3 py-2 rounded-xl border ${selectedId === null ? "bg-slate-900 text-white" : "bg-white"}`}
+
+       >
+
+         ALL
+
+      </button>
+
+      {orders.map((o) => {
+
+         const th = theme(o.side);
+
+         const planned = buildPlan(o).accumSuggested;
+
+         const progress = Math.min(100, Math.round((planned / Math.max(1, o.orderQty)) * 100));
+
+         return (
+
+           <button
+
+            key={o.id}
+
+            onClick={() => onSelect(o.id)}
+
+            className={`w-full text-left px-3 py-2 rounded-xl border ${selectedId === o.id ? "bg-slate-900 text-white" : "bg-white"}`}
+
+           >
+
+             <div className="flex items-center justify-between">
+
+              <div className="font-medium text-sm">{o.name}</div>
+
+              <span className={`text-[10px] px-2 py-0.5 rounded-full ${th.bgSoft} ${th.text}`}>{o.side}</span>
+
+            </div>
+
+             <div className="text-xs opacity-70">{o.symbol} · {o.completed ? "Completed" : "Active"}</div>
+
+             <div className="w-full h-1.5 rounded-full bg-slate-200 mt-2 overflow-hidden">
+
+              <div className={`${th.strong} h-1.5`} style={{ width: `${progress}%` }} />
+
+            </div>
+
+          </button>
+
+         );
+
+       })}
+
+     </div>
+
+   </aside>
+
+ );
+
 }
+
+ 
 
 export default function App() {
-  const [orders, setOrders] = useState<Order[]>([defaultOrder("BUY", 1), defaultOrder("SELL", 1)]);
-  const [selectedId, setSelectedId] = useState<string | null>(null);
-  const [alertsOn, setAlertsOn] = useState(true);
-  const [hideCompleted, setHideCompleted] = useState(false);
 
-  const visibleBase = selectedId ? orders.filter((o) => o.id === selectedId) : orders;
-  const visible = hideCompleted ? visibleBase.filter((o) => !o.completed) : visibleBase;
+ const [orders, setOrders] = useState<Order[]>([defaultOrder("BUY", 1), defaultOrder("SELL", 1)]);
 
-  const chips = [{ id: null as string | null, label: "ALL" }].concat(
-    orders.map((o) => ({ id: o.id, label: o.name, side: o.side } as any))
-  );
+ const [selectedId, setSelectedId] = useState<string | null>(null);
 
-  const addOrder = (side: Side) => setOrders((o) => [...o, defaultOrder(side, o.length + 1)]);
-  const removeOrder = (id: string) => {
-    setOrders((o) => o.filter((x) => x.id !== id));
-    if (selectedId === id) setSelectedId(null);
-  };
-  const duplicateOrder = (id: string) =>
-    setOrders((o) => {
-      const src = o.find((x) => x.id === id);
-      if (!src) return o;
-      return [...o, { ...src, id: Math.random().toString(36).slice(2, 9), name: src.name + " (copy)" }];
-    });
-  const updateOrder = (id: string, next: Order) => setOrders((o) => o.map((x) => (x.id === id ? next : x)));
+ const [alertsOn, setAlertsOn] = useState(true);
 
-  // Dashboard aggregates (respect filter)
-  const agAll = aggregateOrders(visible);
-  const agBuy = aggregateOrders(visible.filter((o) => o.side === "BUY"));
-  const agSell = aggregateOrders(visible.filter((o) => o.side === "SELL"));
+ const [hideCompleted, setHideCompleted] = useState(false);
 
-  return (
-    <div className="min-h-screen bg-slate-50 text-slate-900">
-      {/* Sticky Dashboard */}
-      <div className="sticky top-0 z-20 backdrop-blur bg-slate-50/80 border-b">
-        <div className="max-w-7xl mx-auto p-4 grid gap-4">
-          <div className="flex items-center justify-between flex-wrap gap-3">
-            <h1 className="text-xl font-bold">Execution Planner</h1>
-            <div className="flex items-center gap-2">
-              <label className="text-xs flex items-center gap-2 mr-2">
-                <input type="checkbox" checked={alertsOn} onChange={(e) => setAlertsOn(e.target.checked)} />
-                Alerts on
-              </label>
-              <label className="text-xs flex items-center gap-2 mr-2">
-                <input type="checkbox" checked={hideCompleted} onChange={(e) => setHideCompleted(e.target.checked)} />
-                Hide completed
-              </label>
-              <button onClick={() => addOrder("BUY")} className="px-3 py-2 rounded-xl bg-emerald-600 text-white text-sm">+ Add BUY</button>
-              <button onClick={() => addOrder("SELL")} className="px-3 py-2 rounded-xl bg-rose-600 text-white text-sm">+ Add SELL</button>
-            </div>
+ 
+
+ const visibleBase = selectedId ? orders.filter((o) => o.id === selectedId) : orders;
+
+ const visible = hideCompleted ? visibleBase.filter((o) => !o.completed) : visibleBase;
+
+ 
+
+ const chips = [{ id: null as string | null, label: "ALL" }].concat(
+
+   orders.map((o) => ({ id: o.id, label: o.name, side: o.side } as any))
+
+ );
+
+ 
+
+ const addOrder = (side: Side) => setOrders((o) => [...o, defaultOrder(side, o.length + 1)]);
+
+ const removeOrder = (id: string) => {
+
+   setOrders((o) => o.filter((x) => x.id !== id));
+
+   if (selectedId === id) setSelectedId(null);
+
+ };
+
+ const duplicateOrder = (id: string) =>
+
+   setOrders((o) => {
+
+     const src = o.find((x) => x.id === id);
+
+     if (!src) return o;
+
+     return [...o, { ...src, id: Math.random().toString(36).slice(2, 9), name: src.name + " (copy)" }];
+
+   });
+
+ const updateOrder = (id: string, next: Order) => setOrders((o) => o.map((x) => (x.id === id ? next : x)));
+
+ 
+
+ // Dashboard aggregates (respect filter)
+
+ const agAll = aggregateOrders(visible);
+
+ const agBuy = aggregateOrders(visible.filter((o) => o.side === "BUY"));
+
+ const agSell = aggregateOrders(visible.filter((o) => o.side === "SELL"));
+
+ 
+
+ return (
+
+   <div className="min-h-screen bg-slate-50 text-slate-900">
+
+     {/* Sticky Dashboard */}
+
+     <div className="sticky top-0 z-20 backdrop-blur bg-slate-50/80 border-b">
+
+       <div className="max-w-7xl mx-auto p-4 grid gap-4">
+
+         <div className="flex items-center justify-between flex-wrap gap-3">
+
+           <h1 className="text-xl font-bold">Execution Planner</h1>
+
+           <div className="flex items-center gap-2">
+
+            <label className="text-xs flex items-center gap-2 mr-2">
+
+              <input type="checkbox" checked={alertsOn} onChange={(e) => setAlertsOn(e.target.checked)} />
+
+               Alerts on
+
+            </label>
+
+            <label className="text-xs flex items-center gap-2 mr-2">
+
+              <input type="checkbox" checked={hideCompleted} onChange={(e) => setHideCompleted(e.target.checked)} />
+
+               Hide completed
+
+            </label>
+
+            <button onClick={() => addOrder("BUY")} className="px-3 py-2 rounded-xl bg-emerald-600 text-white text-sm">+ Add BUY</button>
+
+            <button onClick={() => addOrder("SELL")} className="px-3 py-2 rounded-xl bg-rose-600 text-white text-sm">+ Add SELL</button>
+
           </div>
 
-          {/* Summary */}
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-            <SummaryCard title="ALL Orders" tint="slate" ag={agAll} />
-            <SummaryCard title="BUY" tint="emerald" ag={agBuy} side="BUY" />
-            <SummaryCard title="SELL" tint="rose" ag={agSell} side="SELL" />
-          </div>
+         </div>
 
-          {/* Chips Filter (mobile-friendly) */}
-          <div className="flex flex-wrap gap-2">
-            {chips.map((c: any) => {
-              const active = selectedId === c.id;
-              const isBuy = c.side === "BUY";
-              const isSell = c.side === "SELL";
-              const color = active
-                ? "bg-slate-900 text-white"
-                : isBuy
-                ? "bg-emerald-50 text-emerald-700"
-                : isSell
-                ? "bg-rose-50 text-rose-700"
-                : "bg-white text-slate-700";
-              const border = isBuy ? "border-emerald-200" : isSell ? "border-rose-200" : "border-slate-200";
-              return (
-                <button
-                  key={String(c.id ?? "ALL")}
-                  onClick={() => setSelectedId(c.id)}
-                  className={`px-3 py-1.5 rounded-full text-xs border ${color} ${border}`}
-                >
-                  {c.label}
-                </button>
-              );
-            })}
-          </div>
-        </div>
-      </div>
+ 
 
-      {/* Main + Orders Rail */}
-      <div className="max-w-7xl mx-auto p-4 flex gap-6">
-        <div className="flex-1 grid gap-5">
-          {visible.map((o) => (
-            <PlannerCard
-              key={o.id}
-              order={o}
-              alertsOn={alertsOn}
-              onChange={(n) => updateOrder(o.id, n)}
-              onRemove={() => removeOrder(o.id)}
-              onDuplicate={() => duplicateOrder(o.id)}
-            />
-          ))}
-          {visible.length === 0 && <div className="text-sm text-slate-500">No orders to show.</div>}
-        </div>
+         {/* Summary */}
 
-        <OrdersRail orders={orders} selectedId={selectedId} onSelect={setSelectedId} />
-      </div>
+         <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
 
-      {/* Quick sanity tests */}
-      <div className="max-w-7xl mx-auto p-4">
-        <div className="bg-white rounded-2xl shadow p-4 text-sm">
-          <div className="font-semibold">Built-in Self Tests</div>
-          <pre className="text-xs bg-slate-50 p-3 rounded-xl overflow-x-auto">{`console.assert(minutesBetween('09:30','10:00') === 30, 'minutesBetween');
+          <SummaryCard title="ALL Orders" tint="slate" ag={agAll} />
+
+          <SummaryCard title="BUY" tint="emerald" ag={agBuy} side="BUY" />
+
+          <SummaryCard title="SELL" tint="rose" ag={agSell} side="SELL" />
+
+         </div>
+
+ 
+
+         {/* Chips Filter (mobile-friendly) */}
+
+         <div className="flex flex-wrap gap-2">
+
+          {chips.map((c: any) => {
+
+             const active = selectedId === c.id;
+
+             const isBuy = c.side === "BUY";
+
+             const isSell = c.side === "SELL";
+
+             const color = active
+
+               ? "bg-slate-900 text-white"
+
+               : isBuy
+
+               ? "bg-emerald-50 text-emerald-700"
+
+               : isSell
+
+               ? "bg-rose-50 text-rose-700"
+
+               : "bg-white text-slate-700";
+
+             const border = isBuy ? "border-emerald-200" : isSell ? "border-rose-200" : "border-slate-200";
+
+             return (
+
+              <button
+
+                key={String(c.id ?? "ALL")}
+
+                onClick={() => setSelectedId(c.id)}
+
+                className={`px-3 py-1.5 rounded-full text-xs border ${color} ${border}`}
+
+               >
+
+                {c.label}
+
+              </button>
+
+             );
+
+           })}
+
+         </div>
+
+       </div>
+
+     </div>
+
+ 
+
+     {/* Main + Orders Rail */}
+
+     <div className="max-w-7xl mx-auto p-4 flex gap-6">
+
+       <div className="flex-1 grid gap-5">
+
+        {visible.map((o) => (
+
+          <PlannerCard
+
+            key={o.id}
+
+            order={o}
+
+            alertsOn={alertsOn}
+
+            onChange={(n) => updateOrder(o.id, n)}
+
+            onRemove={() => removeOrder(o.id)}
+
+            onDuplicate={() => duplicateOrder(o.id)}
+
+           />
+
+         ))}
+
+        {visible.length === 0 && <div className="text-sm text-slate-500">No orders to show.</div>}
+
+       </div>
+
+ 
+
+       <OrdersRail orders={orders} selectedId={selectedId} onSelect={setSelectedId} />
+
+     </div>
+
+ 
+
+     {/* Quick sanity tests */}
+
+     <div className="max-w-7xl mx-auto p-4">
+
+       <div className="bg-white rounded-2xl shadow p-4 text-sm">
+
+         <div className="font-semibold">Built-in Self Tests</div>
+
+         <pre className="text-xs bg-slate-50 p-3 rounded-xl overflow-x-auto">{`console.assert(minutesBetween('09:30','10:00') === 30, 'minutesBetween');
+
 console.assert(addMinutes('09:30', 30) === '10:00', 'addMinutes');
+
 const ts = timeSlices('09:30','10:30',30); console.assert(ts.length===2 && ts[0].s==='09:30' && ts[1].e==='10:30', 'timeSlices');
+
 const w1 = equalWeights(4); console.assert(Math.abs(w1.reduce((a,b)=>a+b,0)-1) < 1e-9, 'equal sum');
+
 const w2 = uCurveWeights(5); console.assert(Math.abs(w2.reduce((a,b)=>a+b,0)-1) < 1e-9, 'u sum');`}</pre>
-        </div>
-      </div>
-    </div>
-  );
+
+       </div>
+
+     </div>
+
+   </div>
+
+ );
+
 }
+
+ 
